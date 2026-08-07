@@ -74,20 +74,36 @@ Colors are RGB565 values. You can send decimal values or hex values such as `0x0
 
 | Command | Meaning |
 | --- | --- |
-| `C|color` | Clear screen |
-| `B|id|x|y|w|h|label|fill|outline|text` | Draw button |
-| `W|id|x|y|w|h|title|text|fill|outline` | Draw text window |
-| `S|id|x|y|w|h|value|max|track|thumb` | Draw scroll bar |
-| `T|id|x|y|text|color|background|font` | Draw text label |
+| `CL|color` | Clear screen |
+| `BT|id|x|y|w|h|label|fill|outline|text` | Draw button |
+| `TW|id|x|y|w|h|title|text|fill|outline` | Draw text window |
+| `SB|id|x|y|w|h|H/V|value|max|track|thumb` | Draw scroll bar |
+| `TX|id|x|y|text|color|background|font` | Draw text label |
+| `BM|id|x|y|name|foreground|background|scale` | Draw built-in bitmap |
+| `BL|1` / `BL|0` | Backlight on/off |
+| `IV|1` / `IV|0` | Display inversion on/off |
+
+The older one-letter commands `C`, `B`, `W`, `S`, `T`, `L`, and `I` are still accepted for compatibility.
+
+Built-in bitmap names:
+
+| Name | Meaning |
+| --- | --- |
+| `play` | Play icon |
+| `stop` | Stop icon |
+| `wifi` | Wi-Fi icon |
+
+Use background color `0x0001` to keep bitmap background transparent.
 
 Examples:
 
 ```text
-C|0x0000
-B|1|40|80|120|42|START|0x0400|0x07E0|0xFFFF
-W|1|20|150|280|120|Status|System ready|0x4208|0x001F
-S|1|300|150|12|120|50|100|0x0000|0x07FF
-T|1|30|300|Hello ESP32|0xFFE0|0x0000|4
+CL|0x0000
+BT|1|40|80|120|42|START|0x0400|0x07E0|0xFFFF
+TW|1|20|150|280|120|Status|System ready|0x4208|0x001F
+SB|1|300|150|12|120|V|50|100|0x0000|0x07FF
+TX|1|30|300|Hello ESP32|0xFFE0|0x0000|4
+BM|1|30|30|wifi|0x07FF|0x0001|2
 ```
 
 ## Build and upload

@@ -17,12 +17,85 @@ constexpr bool TOUCH_INVERT_X = true;
 constexpr int16_t TOUCH_LEFT_EDGE_X_CORRECTION = 20;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION = 6;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION_RANGE = 140;
+constexpr uint16_t BITMAP_TRANSPARENT = 0x0001;
 
 HardwareSerial UiSerial(2);
 char usbCommand[COMMAND_BUFFER_SIZE];
 char uartCommand[COMMAND_BUFFER_SIZE];
 size_t usbCommandLength = 0;
 size_t uartCommandLength = 0;
+
+const uint8_t ICON_PLAY[] PROGMEM = {
+  0b00000000, 0b00000000,
+  0b00011000, 0b00000000,
+  0b00011100, 0b00000000,
+  0b00011110, 0b00000000,
+  0b00011111, 0b00000000,
+  0b00011111, 0b10000000,
+  0b00011111, 0b11000000,
+  0b00011111, 0b11100000,
+  0b00011111, 0b11100000,
+  0b00011111, 0b11000000,
+  0b00011111, 0b10000000,
+  0b00011111, 0b00000000,
+  0b00011110, 0b00000000,
+  0b00011100, 0b00000000,
+  0b00011000, 0b00000000,
+  0b00000000, 0b00000000
+};
+
+const uint8_t ICON_STOP[] PROGMEM = {
+  0b00000000, 0b00000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00111111, 0b11000000,
+  0b00000000, 0b00000000
+};
+
+const uint8_t ICON_WIFI[] PROGMEM = {
+  0b00000000, 0b00000000,
+  0b00011111, 0b10000000,
+  0b01100000, 0b01100000,
+  0b10000000, 0b00010000,
+  0b00011111, 0b10000000,
+  0b00100000, 0b01000000,
+  0b01000000, 0b00100000,
+  0b00000111, 0b00000000,
+  0b00001000, 0b10000000,
+  0b00010000, 0b01000000,
+  0b00000010, 0b00000000,
+  0b00000111, 0b00000000,
+  0b00000111, 0b00000000,
+  0b00000010, 0b00000000,
+  0b00000000, 0b00000000,
+  0b00000000, 0b00000000
+};
+
+struct BitmapAsset {
+  const char *name;
+  uint8_t width;
+  uint8_t height;
+  const uint8_t *data;
+};
+
+const BitmapAsset BITMAP_ASSETS[] = {
+  {"play", 16, 16, ICON_PLAY},
+  {"stop", 16, 16, ICON_STOP},
+  {"wifi", 16, 16, ICON_WIFI}
+};
+
+void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb);
 
 void updateHeartbeat()
 {
@@ -63,6 +136,34 @@ int parseIntField(const char *value, int fallback = 0)
   }
 
   return atoi(value);
+}
+
+bool isNumericFontText(const char *text)
+{
+  if (text == nullptr) {
+    return true;
+  }
+
+  for (const char *p = text; *p != '\0'; ++p) {
+    char c = *p;
+    bool supported = isDigit(c) || c == ' ' || c == '.' || c == ':' || c == '-' || c == '+';
+    if (!supported) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+int resolveTextFont(const char *text, int requestedFont)
+{
+  requestedFont = constrain(requestedFont, 1, 8);
+
+  if ((requestedFont == 6 || requestedFont == 7 || requestedFont == 8) && !isNumericFontText(text)) {
+    return 4;
+  }
+
+  return requestedFont;
 }
 
 void sendAck(Stream &stream, const char *command, bool ok)
@@ -120,13 +221,18 @@ void drawTextWindow(int id, int x, int y, int w, int h, const char *title, const
 
 void drawScrollBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb)
 {
+  drawScrollBar(id, x, y, w, h, h >= w ? 'V' : 'H', value, maximum, track, thumb);
+}
+
+void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb)
+{
   maximum = max(maximum, 1);
   value = constrain(value, 0, maximum);
 
   tft.fillRoundRect(x, y, w, h, 4, track);
   tft.drawRoundRect(x, y, w, h, 4, TFT_DARKGREY);
 
-  if (h >= w) {
+  if (orientation == 'V' || orientation == 'v') {
     int thumbHeight = max(18, h / 5);
     int travel = max(1, h - thumbHeight - 4);
     int thumbY = y + 2 + (travel * value) / maximum;
@@ -141,13 +247,55 @@ void drawScrollBar(int id, int x, int y, int w, int h, int value, int maximum, u
   Serial.printf("GUI scroll %d rendered\n", id);
 }
 
+const BitmapAsset *findBitmapAsset(const char *name)
+{
+  if (name == nullptr) {
+    return nullptr;
+  }
+
+  for (const BitmapAsset &asset : BITMAP_ASSETS) {
+    if (strcmp(asset.name, name) == 0) {
+      return &asset;
+    }
+  }
+
+  return nullptr;
+}
+
+void drawMonoBitmapAsset(int id, int x, int y, const char *name, uint16_t foreground, uint16_t background, int scale)
+{
+  const BitmapAsset *asset = findBitmapAsset(name);
+  if (asset == nullptr) {
+    Serial.printf("GUI bitmap %d missing asset=%s\n", id, name ? name : "");
+    return;
+  }
+
+  scale = constrain(scale, 1, 8);
+  int bytesPerRow = (asset->width + 7) / 8;
+
+  for (uint8_t row = 0; row < asset->height; row++) {
+    for (uint8_t col = 0; col < asset->width; col++) {
+      uint8_t packed = pgm_read_byte(asset->data + row * bytesPerRow + col / 8);
+      bool pixelOn = (packed & (0x80 >> (col % 8))) != 0;
+      uint16_t color = pixelOn ? foreground : background;
+      if (pixelOn || background != BITMAP_TRANSPARENT) {
+        tft.fillRect(x + col * scale, y + row * scale, scale, scale, color);
+      }
+    }
+  }
+
+  Serial.printf("GUI bitmap %d rendered asset=%s\n", id, asset->name);
+}
+
 void drawTextLabel(int id, int x, int y, const char *text, uint16_t color, uint16_t background, int font)
 {
+  int resolvedFont = resolveTextFont(text, font);
+
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(color, background);
-  tft.drawString(text, x, y, font);
+  tft.drawString(text, x, y, resolvedFont);
 
-  Serial.printf("GUI text %d rendered\n", id);
+  Serial.printf("GUI text %d rendered font=%d\n", id, resolvedFont);
 }
 
 uint16_t correctTouchX(uint16_t x)
@@ -199,8 +347,12 @@ void drawStartupScreen()
   drawButton(1, 44, 110, 132, 48, "START", TFT_DARKGREEN, TFT_GREEN, TFT_WHITE);
   drawButton(2, 196, 110, 132, 48, "STOP", TFT_MAROON, TFT_RED, TFT_WHITE);
   drawButton(3, 348, 110, 88, 48, "OK", TFT_BLUE, TFT_CYAN, TFT_WHITE);
-  drawTextWindow(1, 36, 186, 372, 92, "Status", "Ready for GUI commands over USB Serial or UART2.", TFT_DARKGREY, TFT_NAVY);
-  drawScrollBar(1, 424, 186, 14, 92, 35, 100, TFT_BLACK, TFT_CYAN);
+  drawMonoBitmapAsset(1, 70, 118, "play", TFT_WHITE, BITMAP_TRANSPARENT, 2);
+  drawMonoBitmapAsset(2, 222, 118, "stop", TFT_WHITE, BITMAP_TRANSPARENT, 2);
+  drawMonoBitmapAsset(3, 382, 24, "wifi", TFT_CYAN, BITMAP_TRANSPARENT, 2);
+  drawTextWindow(1, 36, 186, 372, 92, "Status", "BT TX TW SB BM demo ready.", TFT_DARKGREY, TFT_NAVY);
+  drawScrollBar(1, 424, 186, 14, 92, 'V', 35, 100, TFT_BLACK, TFT_CYAN);
+  drawScrollBar(2, 36, 284, 372, 14, 'H', 70, 100, TFT_BLACK, TFT_ORANGE);
 }
 
 bool processCommand(char *line, Stream &reply)
@@ -213,28 +365,28 @@ bool processCommand(char *line, Stream &reply)
     return false;
   }
 
-  if (strcmp(command, "C") == 0) {
+  if (strcmp(command, "C") == 0 || strcmp(command, "CL") == 0) {
     uint16_t color = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     tft.fillScreen(color);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "L") == 0) {
+  if (strcmp(command, "L") == 0 || strcmp(command, "BL") == 0) {
     int enabled = parseIntField(strtok(nullptr, "|"), 1);
     setBacklight(enabled != 0);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "I") == 0) {
+  if (strcmp(command, "I") == 0 || strcmp(command, "IV") == 0) {
     int enabled = parseIntField(strtok(nullptr, "|"), 1);
     tft.invertDisplay(enabled != 0);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "B") == 0) {
+  if (strcmp(command, "B") == 0 || strcmp(command, "BT") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
@@ -249,7 +401,7 @@ bool processCommand(char *line, Stream &reply)
     return true;
   }
 
-  if (strcmp(command, "W") == 0) {
+  if (strcmp(command, "W") == 0 || strcmp(command, "TW") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
@@ -264,22 +416,27 @@ bool processCommand(char *line, Stream &reply)
     return true;
   }
 
-  if (strcmp(command, "S") == 0) {
+  if (strcmp(command, "S") == 0 || strcmp(command, "SB") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
     int w = parseIntField(strtok(nullptr, "|"));
     int h = parseIntField(strtok(nullptr, "|"));
+    char orientation = h >= w ? 'V' : 'H';
+    if (strcmp(command, "SB") == 0) {
+      char *orientationField = strtok(nullptr, "|");
+      orientation = orientationField && orientationField[0] ? orientationField[0] : orientation;
+    }
     int value = parseIntField(strtok(nullptr, "|"));
     int maximum = parseIntField(strtok(nullptr, "|"), 100);
     uint16_t track = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_CYAN);
-    drawScrollBar(id, x, y, w, h, value, maximum, track, thumb);
+    drawScrollBar(id, x, y, w, h, orientation, value, maximum, track, thumb);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "T") == 0) {
+  if (strcmp(command, "T") == 0 || strcmp(command, "TX") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
@@ -288,6 +445,19 @@ bool processCommand(char *line, Stream &reply)
     uint16_t background = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     int font = parseIntField(strtok(nullptr, "|"), 2);
     drawTextLabel(id, x, y, text ? text : "", color, background, font);
+    sendAck(reply, original, true);
+    return true;
+  }
+
+  if (strcmp(command, "BM") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    char *name = strtok(nullptr, "|");
+    uint16_t foreground = parseColor(strtok(nullptr, "|"), TFT_WHITE);
+    uint16_t background = parseColor(strtok(nullptr, "|"), BITMAP_TRANSPARENT);
+    int scale = parseIntField(strtok(nullptr, "|"), 2);
+    drawMonoBitmapAsset(id, x, y, name ? name : "", foreground, background, scale);
     sendAck(reply, original, true);
     return true;
   }
@@ -354,7 +524,7 @@ void setup()
   drawStartupScreen();
   setBacklight(true);
 
-  Serial.println("Commands: I|1, I|0, L|1, L|0, C|color, B|id|x|y|w|h|label|fill|outline|text, W|id|x|y|w|h|title|text|fill|outline");
+  Serial.println("Commands: IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text, TX|id|x|y|text|color|bg|font, TW|id|x|y|w|h|title|text|fill|outline, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
 }
 
 void loop()
