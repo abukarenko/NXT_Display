@@ -17,7 +17,7 @@ constexpr bool TOUCH_INVERT_X = true;
 constexpr int16_t TOUCH_LEFT_EDGE_X_CORRECTION = 20;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION = 6;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION_RANGE = 140;
-constexpr uint16_t BITMAP_TRANSPARENT = 0x0001;
+constexpr uint16_t COLOR_TRANSPARENT = 0x0001;
 
 HardwareSerial UiSerial(2);
 char usbCommand[COMMAND_BUFFER_SIZE];
@@ -295,7 +295,7 @@ void drawMonoBitmapAsset(int id, int x, int y, const char *name, uint16_t foregr
       uint8_t packed = pgm_read_byte(asset->data + row * bytesPerRow + col / 8);
       bool pixelOn = (packed & (0x80 >> (col % 8))) != 0;
       uint16_t color = pixelOn ? foreground : background;
-      if (pixelOn || background != BITMAP_TRANSPARENT) {
+      if (pixelOn || background != COLOR_TRANSPARENT) {
         tft.fillRect(x + col * scale, y + row * scale, scale, scale, color);
       }
     }
@@ -309,7 +309,11 @@ void drawTextLabel(int id, int x, int y, const char *text, uint16_t color, uint1
   int resolvedFont = resolveTextFont(text, font);
 
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(color, background);
+  if (background == COLOR_TRANSPARENT) {
+    tft.setTextColor(color);
+  } else {
+    tft.setTextColor(color, background);
+  }
   tft.drawString(text, x, y, resolvedFont);
 
   Serial.printf("GUI text %d rendered font=%d\n", id, resolvedFont);
@@ -460,7 +464,7 @@ bool processCommand(char *line, Stream &reply)
     int y = parseIntField(strtok(nullptr, "|"));
     char *name = strtok(nullptr, "|");
     uint16_t foreground = parseColor(strtok(nullptr, "|"), TFT_WHITE);
-    uint16_t background = parseColor(strtok(nullptr, "|"), BITMAP_TRANSPARENT);
+    uint16_t background = parseColor(strtok(nullptr, "|"), COLOR_TRANSPARENT);
     int scale = parseIntField(strtok(nullptr, "|"), 2);
     drawMonoBitmapAsset(id, x, y, name ? name : "", foreground, background, scale);
     sendAck(reply, original, true);
