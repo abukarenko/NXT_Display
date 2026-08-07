@@ -95,6 +95,8 @@ Built-in bitmap names:
 
 Use background color `0x0001` to keep bitmap background transparent.
 
+The startup demo is stored as command strings in firmware and is executed through the same parser as USB Serial and UART2 input. This keeps the built-in demo behavior aligned with the external protocol.
+
 Examples:
 
 ```text

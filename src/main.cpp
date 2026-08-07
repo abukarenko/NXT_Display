@@ -96,6 +96,23 @@ const BitmapAsset BITMAP_ASSETS[] = {
 };
 
 void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb);
+bool processCommand(char *line, Stream &reply);
+
+const char *STARTUP_DEMO_SCRIPT[] = {
+  "CL|0x0000",
+  "TW|1|18|16|444|64|NXT Display|UART command renderer|0x0010|0x07FF",
+  "TX|1|102|32|ESP32 GUI DISPLAY|0xFFFF|0x0010|4",
+  "TX|2|142|60|BT TX TW SB BM demo|0xFFFF|0x0010|2",
+  "BM|3|382|24|wifi|0x07FF|0x0001|2",
+  "BT|1|44|110|132|48|START|0x0320|0x07E0|0xFFFF",
+  "BM|1|70|118|play|0xFFFF|0x0001|2",
+  "BT|2|196|110|132|48|STOP|0x7800|0xF800|0xFFFF",
+  "BM|2|222|118|stop|0xFFFF|0x0001|2",
+  "BT|3|348|110|88|48|OK|0x001F|0x07FF|0xFFFF",
+  "TW|2|36|186|372|92|Status|Script demo executed through parser.|0x4208|0x0010",
+  "SB|1|424|186|14|92|V|35|100|0x0000|0x07FF",
+  "SB|2|36|284|372|14|H|70|100|0x0000|0xFD20"
+};
 
 void updateHeartbeat()
 {
@@ -335,24 +352,12 @@ bool readTouchPoint(uint16_t &x, uint16_t &y)
 void drawStartupScreen()
 {
   setBacklight(true);
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
 
-  tft.fillRoundRect(18, 16, 444, 64, 8, TFT_NAVY);
-  tft.drawRoundRect(18, 16, 444, 64, 8, TFT_CYAN);
-  tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.drawString("ESP32 GUI DISPLAY", 240, 40, 4);
-  tft.drawString("UART command renderer", 240, 66, 2);
-
-  drawButton(1, 44, 110, 132, 48, "START", TFT_DARKGREEN, TFT_GREEN, TFT_WHITE);
-  drawButton(2, 196, 110, 132, 48, "STOP", TFT_MAROON, TFT_RED, TFT_WHITE);
-  drawButton(3, 348, 110, 88, 48, "OK", TFT_BLUE, TFT_CYAN, TFT_WHITE);
-  drawMonoBitmapAsset(1, 70, 118, "play", TFT_WHITE, BITMAP_TRANSPARENT, 2);
-  drawMonoBitmapAsset(2, 222, 118, "stop", TFT_WHITE, BITMAP_TRANSPARENT, 2);
-  drawMonoBitmapAsset(3, 382, 24, "wifi", TFT_CYAN, BITMAP_TRANSPARENT, 2);
-  drawTextWindow(1, 36, 186, 372, 92, "Status", "BT TX TW SB BM demo ready.", TFT_DARKGREY, TFT_NAVY);
-  drawScrollBar(1, 424, 186, 14, 92, 'V', 35, 100, TFT_BLACK, TFT_CYAN);
-  drawScrollBar(2, 36, 284, 372, 14, 'H', 70, 100, TFT_BLACK, TFT_ORANGE);
+  for (const char *scriptLine : STARTUP_DEMO_SCRIPT) {
+    char commandBuffer[COMMAND_BUFFER_SIZE];
+    strlcpy(commandBuffer, scriptLine, sizeof(commandBuffer));
+    processCommand(commandBuffer, Serial);
+  }
 }
 
 bool processCommand(char *line, Stream &reply)
