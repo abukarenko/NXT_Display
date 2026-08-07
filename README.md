@@ -1,0 +1,76 @@
+# Nextion_esp32
+
+PlatformIO project for an ESP32 used as a smart display controller for an SPI ILI9488 screen.
+
+The idea is similar to Nextion HMI modules: the main device sends short commands over a data line, and the ESP32 draws GUI elements locally. This keeps the external protocol compact while buttons, windows, scroll bars, labels, and other widgets are rendered by the ESP32.
+
+## Default wiring
+
+### ILI9488 display
+
+This pinout is for the common red 4.0 inch ILI9488 SPI board with resistive touch.
+
+| Board label | ESP32 pin |
+| --- | --- |
+| CS | GPIO5 |
+| RST | GPIO4 |
+| D/C | GPIO21 |
+| SDI | GPIO23 |
+| SCK | GPIO18 |
+| BL | GPIO32 |
+| SDO | leave disconnected |
+| VDD | 3.3V |
+| GND | GND |
+
+If your display uses other pins, edit `include/User_Setup.h`.
+
+GPIO2 is reserved for the onboard blue heartbeat LED on ESP32 DevKit v1.
+
+### GUI command UART
+
+| Board label | ESP32 pin |
+| --- | --- |
+| TCK | GPIO18 |
+| TCS | GPIO22 |
+| TDI | GPIO23 |
+| TDO | GPIO19 |
+| PEN | GPIO34 |
+
+Default baud rate: `115200`.
+
+USB Serial also accepts the same commands, which is convenient for testing from the PlatformIO monitor.
+
+The display `SDO` pin can block the shared MISO line on this red board. Leave display `SDO` disconnected and connect only touch `TDO` to `GPIO19`.
+
+The onboard microSD socket on the display module is not used yet. Leave the SD pins disconnected for the first display and touch bring-up.
+
+## Command protocol
+
+Each command is one text line ending with `\n`. Fields are separated by `|`.
+
+Colors are RGB565 values. You can send decimal values or hex values such as `0x001F`.
+
+| Command | Meaning |
+| --- | --- |
+| `C|color` | Clear screen |
+| `B|id|x|y|w|h|label|fill|outline|text` | Draw button |
+| `W|id|x|y|w|h|title|text|fill|outline` | Draw text window |
+| `S|id|x|y|w|h|value|max|track|thumb` | Draw scroll bar |
+| `T|id|x|y|text|color|background|font` | Draw text label |
+
+Examples:
+
+```text
+C|0x0000
+B|1|40|80|120|42|START|0x0400|0x07E0|0xFFFF
+W|1|20|150|280|120|Status|System ready|0x4208|0x001F
+S|1|300|150|12|120|50|100|0x0000|0x07FF
+T|1|30|300|Hello ESP32|0xFFE0|0x0000|4
+```
+
+## Build and upload
+
+```powershell
+C:\Users\basachka\.platformio\penv\Scripts\pio.exe run
+C:\Users\basachka\.platformio\penv\Scripts\pio.exe run -t upload
+```
