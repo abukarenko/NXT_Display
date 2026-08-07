@@ -1,8 +1,22 @@
-# Nextion_esp32
+# NXT_Display
 
 PlatformIO project for an ESP32 used as a smart display controller for an SPI ILI9488 screen.
 
 The idea is similar to Nextion HMI modules: the main device sends short commands over a data line, and the ESP32 draws GUI elements locally. This keeps the external protocol compact while buttons, windows, scroll bars, labels, and other widgets are rendered by the ESP32.
+
+## Hardware
+
+### Display module
+
+![4 inch ILI9488 touch display](pictures/4INCH_ILI9488+Touch.jpeg)
+
+Common red 4.0 inch SPI ILI9488 board with resistive touch. The module also has a microSD socket, but this project does not use it yet.
+
+### ESP32 board
+
+![ESP32 DevKit v1](pictures/esp32devKit1.png)
+
+Target board: ESP32 DevKit v1 / `esp32dev`.
 
 ## Default wiring
 
@@ -26,7 +40,7 @@ If your display uses other pins, edit `include/User_Setup.h`.
 
 GPIO2 is reserved for the onboard blue heartbeat LED on ESP32 DevKit v1.
 
-### GUI command UART
+### Resistive touch
 
 | Board label | ESP32 pin |
 | --- | --- |
@@ -36,13 +50,21 @@ GPIO2 is reserved for the onboard blue heartbeat LED on ESP32 DevKit v1.
 | TDO | GPIO19 |
 | PEN | GPIO34 |
 
-Default baud rate: `115200`.
-
-USB Serial also accepts the same commands, which is convenient for testing from the PlatformIO monitor.
-
 The display `SDO` pin can block the shared MISO line on this red board. Leave display `SDO` disconnected and connect only touch `TDO` to `GPIO19`.
 
 The onboard microSD socket on the display module is not used yet. Leave the SD pins disconnected for the first display and touch bring-up.
+
+### GUI command UART
+
+| Signal | ESP32 pin |
+| --- | --- |
+| UART2 RX | GPIO16 |
+| UART2 TX | GPIO17 |
+| GND | GND |
+
+Default baud rate: `115200`.
+
+USB Serial also accepts the same commands, which is convenient for testing from the PlatformIO monitor.
 
 ## Command protocol
 
