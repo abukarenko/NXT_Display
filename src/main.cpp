@@ -150,32 +150,6 @@ void drawTextLabel(int id, int x, int y, const char *text, uint16_t color, uint1
   Serial.printf("GUI text %d rendered\n", id);
 }
 
-void drawTouchPanel()
-{
-  tft.fillRoundRect(36, 286, 372, 26, 5, TFT_BLACK);
-  tft.drawRoundRect(36, 286, 372, 26, 5, TFT_DARKGREY);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.drawString("Touch test: press screen", 222, 299, 2);
-}
-
-uint16_t readXpt2046Raw(uint8_t command)
-{
-  digitalWrite(TFT_CS, HIGH);
-  digitalWrite(TOUCH_CS, LOW);
-  delayMicroseconds(5);
-  SPI.beginTransaction(SPISettings(SPI_TOUCH_FREQUENCY, MSBFIRST, SPI_MODE0));
-  SPI.transfer(command);
-  uint16_t hi = SPI.transfer(0x00);
-  uint16_t lo = SPI.transfer(0x00);
-  SPI.endTransaction();
-  delayMicroseconds(5);
-  digitalWrite(TOUCH_CS, HIGH);
-
-  uint16_t value = (hi << 8) | lo;
-  return (value >> 3) & 0x0FFF;
-}
-
 uint16_t correctTouchX(uint16_t x)
 {
   int32_t corrected = x;
@@ -191,6 +165,23 @@ uint16_t correctTouchX(uint16_t x)
   }
 
   return constrain(corrected, 0, tft.width() - 1);
+}
+
+bool readTouchPoint(uint16_t &x, uint16_t &y)
+{
+  if (!tft.getTouch(&x, &y, TOUCH_THRESHOLD)) {
+    return false;
+  }
+
+  x = constrain(x, 0, tft.width() - 1);
+  y = constrain(y, 0, tft.height() - 1);
+
+  if (TOUCH_INVERT_X) {
+    x = tft.width() - 1 - x;
+  }
+
+  x = correctTouchX(x);
+  return true;
 }
 
 void drawStartupScreen()
@@ -210,8 +201,6 @@ void drawStartupScreen()
   drawButton(3, 348, 110, 88, 48, "OK", TFT_BLUE, TFT_CYAN, TFT_WHITE);
   drawTextWindow(1, 36, 186, 372, 92, "Status", "Ready for GUI commands over USB Serial or UART2.", TFT_DARKGREY, TFT_NAVY);
   drawScrollBar(1, 424, 186, 14, 92, 35, 100, TFT_BLACK, TFT_CYAN);
-
-  drawTouchPanel();
 }
 
 bool processCommand(char *line, Stream &reply)
@@ -334,82 +323,6 @@ void readCommandStream(Stream &stream, char *buffer, size_t &length)
   }
 }
 
-void updateTouchTest()
-{
-  static uint32_t lastTouchPrint = 0;
-  static uint32_t lastIdlePrint = 0;
-  static uint16_t lastX = 0;
-  static uint16_t lastY = 0;
-  static bool hadTouch = false;
-
-  uint16_t rawX = 0;
-  uint16_t rawY = 0;
-  uint16_t x = 0;
-  uint16_t y = 0;
-  uint16_t z = tft.getTouchRawZ();
-  int misoIdle = digitalRead(TFT_MISO);
-  uint16_t directX = readXpt2046Raw(0xD0);
-  uint16_t directY = readXpt2046Raw(0x90);
-  uint16_t directZ1 = readXpt2046Raw(0xB0);
-  uint16_t directZ2 = readXpt2046Raw(0xC0);
-  int misoAfter = digitalRead(TFT_MISO);
-  bool touched = tft.getTouch(&x, &y, TOUCH_THRESHOLD);
-  tft.getTouchRaw(&rawX, &rawY);
-
-  if (millis() - lastIdlePrint > 1000) {
-    lastIdlePrint = millis();
-    Serial.printf("TOUCH_RAW rawX=%u rawY=%u z=%u irq=%d touched=%d directX=%u directY=%u z1=%u z2=%u miso=%d/%d\n",
-                  rawX, rawY, z, digitalRead(TOUCH_IRQ_PIN), touched ? 1 : 0, directX, directY, directZ1, directZ2, misoIdle, misoAfter);
-  }
-
-  if (!touched) {
-    if (hadTouch) {
-      drawTouchPanel();
-      hadTouch = false;
-    }
-    if (z > 50 && millis() - lastTouchPrint > 120) {
-      lastTouchPrint = millis();
-      tft.fillRoundRect(36, 286, 372, 26, 5, TFT_BLACK);
-      tft.drawRoundRect(36, 286, 372, 26, 5, TFT_ORANGE);
-      tft.setTextDatum(MC_DATUM);
-      tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-      tft.drawString("raw=" + String(rawX) + "," + String(rawY) + " z=" + String(z) + " no calib", 222, 299, 2);
-      Serial.printf("TOUCH_RAW_ACTIVE rawX=%u rawY=%u z=%u irq=%d directX=%u directY=%u z1=%u z2=%u miso=%d/%d\n",
-                    rawX, rawY, z, digitalRead(TOUCH_IRQ_PIN), directX, directY, directZ1, directZ2, misoIdle, misoAfter);
-    }
-    return;
-  }
-
-  hadTouch = true;
-  x = constrain(x, 0, tft.width() - 1);
-  y = constrain(y, 0, tft.height() - 1);
-  if (TOUCH_INVERT_X) {
-    x = tft.width() - 1 - x;
-  }
-  x = correctTouchX(x);
-
-  if (abs(static_cast<int>(x) - static_cast<int>(lastX)) > 2 || abs(static_cast<int>(y) - static_cast<int>(lastY)) > 2) {
-    if (lastX < tft.width() && lastY < tft.height()) {
-      tft.drawCircle(lastX, lastY, 6, TFT_BLACK);
-    }
-    tft.drawCircle(x, y, 6, TFT_YELLOW);
-    tft.drawPixel(x, y, TFT_RED);
-    lastX = x;
-    lastY = y;
-  }
-
-  if (millis() - lastTouchPrint > 120) {
-    lastTouchPrint = millis();
-    tft.fillRoundRect(36, 286, 372, 26, 5, TFT_BLACK);
-    tft.drawRoundRect(36, 286, 372, 26, 5, TFT_YELLOW);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString("x=" + String(x) + " y=" + String(y) + " raw=" + String(rawX) + "," + String(rawY) + " z=" + String(z), 222, 299, 2);
-
-    Serial.printf("TOUCH x=%u y=%u rawX=%u rawY=%u z=%u irq=%d\n", x, y, rawX, rawY, z, digitalRead(TOUCH_IRQ_PIN));
-  }
-}
-
 void setup()
 {
   Serial.begin(115200);
@@ -448,7 +361,6 @@ void loop()
 {
   setBacklight(true);
   updateHeartbeat();
-  updateTouchTest();
   readCommandStream(Serial, usbCommand, usbCommandLength);
   readCommandStream(UiSerial, uartCommand, uartCommandLength);
 }
