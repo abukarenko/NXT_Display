@@ -100,18 +100,18 @@ bool processCommand(char *line, Stream &reply);
 
 const char *STARTUP_DEMO_SCRIPT[] = {
   "CL|0x0000",
-  "TW|1|18|16|444|64|NXT Display|UART command renderer|0x0010|0x07FF",
-  "TX|1|102|32|ESP32 GUI DISPLAY|0xFFFF|0x0010|4",
-  "TX|2|142|60|BT TX TW SB BM demo|0xFFFF|0x0010|2",
-  "BM|3|382|24|wifi|0x07FF|0x0001|2",
-  "BT|1|44|110|132|48|START|0x0320|0x07E0|0xFFFF",
-  "BM|1|70|118|play|0xFFFF|0x0001|2",
-  "BT|2|196|110|132|48|STOP|0x7800|0xF800|0xFFFF",
-  "BM|2|222|118|stop|0xFFFF|0x0001|2",
-  "BT|3|348|110|88|48|OK|0x001F|0x07FF|0xFFFF",
-  "TW|2|36|186|372|92|Status|Script demo executed through parser.|0x4208|0x0010",
-  "SB|1|424|186|14|92|V|35|100|0x0000|0x07FF",
-  "SB|2|36|284|372|14|H|70|100|0x0000|0xFD20"
+  "TW|1|18|14|444|78|NXT Display|UART command renderer|0x0010|0x0010",
+  "TX|1|126|38|ESP32 GUI DISPLAY|0xFFFF|0x0010|4",
+  "TX|2|154|70|BT TX TW SB BM demo|0xFFFF|0x0010|2",
+  "BM|3|382|22|wifi|0x07FF|0x0001|2",
+  "BT|1|44|118|132|48|START|0x0320|0x07E0|0xFFFF",
+  "BM|1|58|134|play|0xFFFF|0x0001|1",
+  "BT|2|196|118|132|48|STOP|0x7800|0xF800|0xFFFF",
+  "BM|2|210|134|stop|0xFFFF|0x0001|1",
+  "BT|3|348|118|88|48|OK|0x001F|0x07FF|0xFFFF",
+  "TW|2|36|194|372|82|Status|Script demo executed through parser.|0x4208|0x0010",
+  "SB|1|424|194|14|82|V|35|100|0x0000|0x07FF",
+  "SB|2|36|286|372|14|H|70|100|0x0000|0xFD20"
 };
 
 void updateHeartbeat()
