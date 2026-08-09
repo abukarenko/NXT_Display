@@ -1,7 +1,9 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
+#include <SD.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
+#include <TJpg_Decoder.h>
 #include <WiFi.h>
 #include <FontsRus/FreeSansBold18.h>
 
@@ -20,6 +22,8 @@ constexpr uint8_t HEARTBEAT_LED_PIN = 2;
 constexpr uint8_t TOUCH_IRQ_PIN = TOUCH_IRQ;
 constexpr uint8_t UI_UART_RX = 16;
 constexpr uint8_t UI_UART_TX = 17;
+constexpr uint8_t SD_CS_PIN = 27;
+constexpr uint32_t SD_SPI_FREQUENCY = 4000000;
 constexpr uint32_t UI_UART_BAUD = 115200;
 constexpr size_t COMMAND_BUFFER_SIZE = 192;
 constexpr uint16_t TOUCH_THRESHOLD = 250;
@@ -56,6 +60,7 @@ size_t usbCommandLength = 0;
 size_t uartCommandLength = 0;
 bool otaReady = false;
 bool otaInProgress = false;
+bool sdReady = false;
 int otaDisplayedPercent = -1;
 UiButton uiButtons[MAX_UI_BUTTONS];
 size_t uiButtonCount = 0;
@@ -279,8 +284,105 @@ void printHelp(Stream &stream)
   stream.println("  BM|id|x|y|name|foreground|background|scale");
   stream.println("    Draw bitmap. Names: play, stop, wifi.");
   stream.println("    Use background 0x0001 for transparency.");
+  stream.println("  SD");
+  stream.println("    Show microSD status and capacity.");
+  stream.println("  LS|path");
+  stream.println("    List files in a microSD directory. Example: LS|/");
+  stream.println("  JPG|id|x|y|path|scale");
+  stream.println("    Draw a JPEG from microSD. Scale: 1, 2, 4, or 8.");
+  stream.println("    Example: JPG|1|20|20|/icons/play.jpg|1");
   stream.println("Colors are RGB565 numbers, for example 0x0000 black and 0xFFFF white.");
   stream.println("Legacy aliases: C, L, I, B, W, S, T.");
+}
+
+void printSdStatus(Stream &stream)
+{
+  if (!sdReady) {
+    stream.println("SD|NOT_READY");
+    return;
+  }
+
+  stream.printf("SD|READY|SIZE_MB|%llu|USED_MB|%llu\n",
+                SD.cardSize() / (1024ULL * 1024ULL),
+                SD.usedBytes() / (1024ULL * 1024ULL));
+}
+
+bool listSdDirectory(const char *path, Stream &stream)
+{
+  if (!sdReady) {
+    stream.println("ERR|sd_not_ready");
+    return false;
+  }
+
+  const char *resolvedPath = path && path[0] ? path : "/";
+  File directory = SD.open(resolvedPath);
+  if (!directory || !directory.isDirectory()) {
+    stream.print("ERR|sd_directory|");
+    stream.println(resolvedPath);
+    if (directory) {
+      directory.close();
+    }
+    return false;
+  }
+
+  for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+    stream.print(entry.isDirectory() ? "DIR|" : "FILE|");
+    stream.print(entry.name());
+    if (!entry.isDirectory()) {
+      stream.print('|');
+      stream.print(entry.size());
+    }
+    stream.println();
+    entry.close();
+  }
+
+  directory.close();
+  return true;
+}
+
+bool jpegOutput(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *pixels)
+{
+  if (y >= tft.height() || x >= tft.width()) {
+    return false;
+  }
+
+  tft.pushImage(x, y, w, h, pixels);
+  return true;
+}
+
+bool drawSdJpeg(int id, int x, int y, const char *path, int scale, Stream &reply)
+{
+  if (!sdReady) {
+    reply.println("ERR|jpg|sd_not_ready");
+    return false;
+  }
+
+  if (path == nullptr || path[0] == '\0') {
+    reply.println("ERR|jpg|missing_path");
+    return false;
+  }
+
+  String resolvedPath = path[0] == '/' ? String(path) : String('/') + path;
+  if (!SD.exists(resolvedPath)) {
+    reply.print("ERR|jpg|not_found|");
+    reply.println(resolvedPath);
+    return false;
+  }
+
+  if (scale != 1 && scale != 2 && scale != 4 && scale != 8) {
+    reply.println("ERR|jpg|invalid_scale");
+    return false;
+  }
+
+  TJpgDec.setJpgScale(scale);
+  JRESULT result = TJpgDec.drawSdJpg(x, y, resolvedPath);
+  if (result != JDR_OK) {
+    reply.printf("ERR|jpg|decode|%d|%s\n", static_cast<int>(result), resolvedPath.c_str());
+    return false;
+  }
+
+  Serial.printf("GUI JPEG %d rendered path=%s scale=%d\n", id, resolvedPath.c_str(), scale);
+  return true;
 }
 
 void setBacklight(bool enabled)
@@ -769,6 +871,33 @@ bool processCommand(char *line, Stream &reply)
     return true;
   }
 
+  if (strcmp(command, "SD") == 0) {
+    printSdStatus(reply);
+    return sdReady;
+  }
+
+  if (strcmp(command, "LS") == 0) {
+    char *path = strtok(nullptr, "|");
+    bool ok = listSdDirectory(path, reply);
+    if (ok) {
+      sendAck(reply, original, true);
+    }
+    return ok;
+  }
+
+  if (strcmp(command, "JPG") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    char *path = strtok(nullptr, "|");
+    int scale = parseIntField(strtok(nullptr, "|"), 1);
+    bool ok = drawSdJpeg(id, x, y, path, scale, reply);
+    if (ok) {
+      sendAck(reply, original, true);
+    }
+    return ok;
+  }
+
   if (strcmp(command, "C") == 0 || strcmp(command, "CL") == 0) {
     uint16_t color = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     tft.fillScreen(color);
@@ -928,6 +1057,8 @@ void setup()
   pinMode(TOUCH_IRQ_PIN, INPUT);
   pinMode(TOUCH_CS, OUTPUT);
   digitalWrite(TOUCH_CS, HIGH);
+  pinMode(SD_CS_PIN, OUTPUT);
+  digitalWrite(SD_CS_PIN, HIGH);
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH);
   pinMode(TFT_MISO, INPUT_PULLUP);
@@ -938,15 +1069,20 @@ void setup()
     blinkBacklightAtBoot();
   }
 
+  sdReady = SD.begin(SD_CS_PIN, SPI, SD_SPI_FREQUENCY) && SD.cardType() != CARD_NONE;
+  printSdStatus(Serial);
+
   tft.init();
   tft.setRotation(3);
   tft.invertDisplay(DISPLAY_INVERTED);
+  TJpgDec.setSwapBytes(true);
+  TJpgDec.setCallback(jpegOutput);
   setBacklight(true);
   drawStartupScreen();
   setBacklight(true);
   startOta();
 
-  Serial.println("Commands: IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text, TX|id|x|y|text|color|bg|font, TW|id|x|y|w|h|title|text|fill|outline, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
+  Serial.println("Commands: HELP, SD, LS|path, JPG|id|x|y|path|scale, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text, TX|id|x|y|text|color|bg|font, TW|id|x|y|w|h|title|text|fill|outline, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
 }
 
 void loop()
