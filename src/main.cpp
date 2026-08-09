@@ -1,6 +1,16 @@
 #include <Arduino.h>
+#include <ArduinoOTA.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
+#include <WiFi.h>
+
+#if __has_include("ota_secrets.h")
+#include "ota_secrets.h"
+#else
+#define WIFI_SSID ""
+#define WIFI_PASSWORD ""
+#define OTA_PASSWORD ""
+#endif
 
 TFT_eSPI tft;
 
@@ -18,12 +28,17 @@ constexpr int16_t TOUCH_LEFT_EDGE_X_CORRECTION = 20;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION = 6;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION_RANGE = 140;
 constexpr uint16_t COLOR_TRANSPARENT = 0x0001;
+constexpr char OTA_HOSTNAME[] = "nxt-display";
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 
 HardwareSerial UiSerial(2);
 char usbCommand[COMMAND_BUFFER_SIZE];
 char uartCommand[COMMAND_BUFFER_SIZE];
 size_t usbCommandLength = 0;
 size_t uartCommandLength = 0;
+bool otaReady = false;
+bool otaInProgress = false;
+int otaDisplayedPercent = -1;
 
 const uint8_t ICON_PLAY[] PROGMEM = {
   0b00000000, 0b00000000,
@@ -205,6 +220,116 @@ void blinkBacklightAtBoot()
   }
 
   setBacklight(true);
+}
+
+void drawOtaProgress(unsigned int percent, const char *status, uint16_t statusColor)
+{
+  percent = min(percent, 100U);
+
+  constexpr int16_t barX = 50;
+  constexpr int16_t barY = 176;
+  constexpr int16_t barWidth = 380;
+  constexpr int16_t barHeight = 32;
+  constexpr int16_t barInset = 4;
+  constexpr int16_t percentY = 118;
+
+  bool firstDraw = otaDisplayedPercent < 0;
+  if (firstDraw) {
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString("OTA UPDATE", tft.width() / 2, 64, 4);
+    tft.drawRoundRect(barX, barY, barWidth, barHeight, 6, TFT_WHITE);
+    tft.fillRoundRect(barX + barInset, barY + barInset, barWidth - 2 * barInset, barHeight - 2 * barInset, 3, TFT_DARKGREY);
+
+    tft.setTextColor(statusColor, TFT_BLACK);
+    tft.drawString(status, tft.width() / 2, 250, 2);
+  }
+
+  if (static_cast<int>(percent) != otaDisplayedPercent) {
+    char percentText[8];
+    snprintf(percentText, sizeof(percentText), "%u%%", percent);
+
+    tft.fillRect(170, percentY - 25, 140, 50, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(percentText, tft.width() / 2, percentY, 4);
+
+    int16_t innerWidth = barWidth - 2 * barInset;
+    int16_t previousWidth = otaDisplayedPercent > 0 ? (innerWidth * otaDisplayedPercent) / 100 : 0;
+    int16_t filledWidth = (innerWidth * percent) / 100;
+    if (filledWidth > previousWidth) {
+      tft.fillRect(barX + barInset + previousWidth, barY + barInset, filledWidth - previousWidth, barHeight - 2 * barInset, TFT_GREEN);
+    }
+
+    otaDisplayedPercent = static_cast<int>(percent);
+  }
+
+  if (!firstDraw && (percent == 100 || statusColor == TFT_RED)) {
+    tft.fillRect(30, 232, 420, 36, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(statusColor, TFT_BLACK);
+    tft.drawString(status, tft.width() / 2, 250, 2);
+  }
+}
+
+void startOta()
+{
+  if (WIFI_SSID[0] == '\0') {
+    Serial.println("OTA disabled: configure include/ota_secrets.h");
+    return;
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setHostname(OTA_HOSTNAME);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.printf("Connecting to Wi-Fi for OTA: %s", WIFI_SSID);
+  uint32_t startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("OTA unavailable: Wi-Fi connection timed out");
+    return;
+  }
+
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
+  if (OTA_PASSWORD[0] != '\0') {
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+  }
+
+  ArduinoOTA.onStart([]() {
+    otaInProgress = true;
+    otaDisplayedPercent = -1;
+    setBacklight(true);
+    drawOtaProgress(0, "Receiving firmware...", TFT_YELLOW);
+    Serial.println("OTA update started");
+  });
+  ArduinoOTA.onEnd([]() {
+    drawOtaProgress(100, "Update complete. Restarting...", TFT_GREEN);
+    Serial.println("\nOTA update finished");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    unsigned int percent = total ? (progress * 100U) / total : 0U;
+    if (percent == 100U || otaDisplayedPercent < 0 || static_cast<int>(percent) >= otaDisplayedPercent + 5) {
+      drawOtaProgress(percent, "Receiving firmware...", TFT_YELLOW);
+      Serial.printf("OTA progress: %u%%\r", percent);
+    }
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    otaInProgress = false;
+    drawOtaProgress(otaDisplayedPercent < 0 ? 0U : static_cast<unsigned int>(otaDisplayedPercent), "OTA ERROR", TFT_RED);
+    Serial.printf("\nOTA error %u\n", error);
+  });
+
+  ArduinoOTA.begin();
+  otaReady = true;
+  Serial.printf("OTA ready: %s.local, IP=%s\n", OTA_HOSTNAME, WiFi.localIP().toString().c_str());
 }
 
 void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t fill, uint16_t outline, uint16_t text)
@@ -532,6 +657,7 @@ void setup()
   setBacklight(true);
   drawStartupScreen();
   setBacklight(true);
+  startOta();
 
   Serial.println("Commands: IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text, TX|id|x|y|text|color|bg|font, TW|id|x|y|w|h|title|text|fill|outline, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
 }
@@ -540,6 +666,13 @@ void loop()
 {
   setBacklight(true);
   updateHeartbeat();
+  if (otaReady) {
+    ArduinoOTA.handle();
+    if (otaInProgress) {
+      delay(1);
+      return;
+    }
+  }
   readCommandStream(Serial, usbCommand, usbCommandLength);
   readCommandStream(UiSerial, uartCommand, uartCommandLength);
 }

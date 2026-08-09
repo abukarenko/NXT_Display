@@ -114,3 +114,11 @@ BM|1|30|30|wifi|0x07FF|0x0001|2
 C:\Users\basachka\.platformio\penv\Scripts\pio.exe run
 C:\Users\basachka\.platformio\penv\Scripts\pio.exe run -t upload
 ```
+# OTA updates
+
+1. Copy `include/ota_secrets.example.h` to `include/ota_secrets.h` and enter the Wi-Fi credentials and an OTA password. The local secrets file is ignored by Git.
+2. Upload the firmware once over USB with the `esp32dev` environment.
+3. Confirm in the serial monitor that `OTA ready: nxt-display.local` is printed.
+4. Upload subsequent builds with the `esp32dev_ota` environment.
+
+If `OTA_PASSWORD` is not empty, the OTA upload script reads it from the ignored `include/ota_secrets.h` file automatically.
