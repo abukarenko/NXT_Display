@@ -122,3 +122,16 @@ C:\Users\basachka\.platformio\penv\Scripts\pio.exe run -t upload
 4. Upload subsequent builds with the `esp32dev_ota` environment.
 
 If `OTA_PASSWORD` is not empty, the OTA upload script reads it from the ignored `include/ota_secrets.h` file automatically.
+microSD	ESP32	Уже используется
+SCK	GPIO18	TFT + touch
+MISO	GPIO19	TFT + touch
+MOSI	GPIO23	TFT + touch
+CS	GPIO27	новый отдельный CS
+GND	GND	—
+VCC	3.3 V	—
+
+
+Текущие CS остаются:
+TFT CS   = GPIO5
+Touch CS = GPIO22
+SD CS    = GPIO27

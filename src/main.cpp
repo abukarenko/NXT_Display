@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <FontsRus/FreeSansBold18.h>
 
 #if __has_include("ota_secrets.h")
 #include "ota_secrets.h"
@@ -27,9 +28,26 @@ constexpr bool TOUCH_INVERT_X = true;
 constexpr int16_t TOUCH_LEFT_EDGE_X_CORRECTION = 20;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION = 6;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION_RANGE = 140;
+constexpr int16_t LARGE_FONT_X_CORRECTION = 3;
+constexpr int16_t LARGE_FONT_Y_CORRECTION = 4;
 constexpr uint16_t COLOR_TRANSPARENT = 0x0001;
 constexpr char OTA_HOSTNAME[] = "nxt-display";
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+constexpr uint32_t TOUCH_POLL_INTERVAL_MS = 25;
+constexpr size_t MAX_UI_BUTTONS = 16;
+constexpr size_t BUTTON_LABEL_SIZE = 24;
+
+struct UiButton {
+  int id;
+  int16_t x;
+  int16_t y;
+  int16_t w;
+  int16_t h;
+  uint16_t fill;
+  uint16_t outline;
+  uint16_t text;
+  char label[BUTTON_LABEL_SIZE];
+};
 
 HardwareSerial UiSerial(2);
 char usbCommand[COMMAND_BUFFER_SIZE];
@@ -39,6 +57,12 @@ size_t uartCommandLength = 0;
 bool otaReady = false;
 bool otaInProgress = false;
 int otaDisplayedPercent = -1;
+UiButton uiButtons[MAX_UI_BUTTONS];
+size_t uiButtonCount = 0;
+int pressedButtonIndex = -1;
+int currentTouchButtonIndex = -1;
+uint16_t lastTouchX = 0;
+uint16_t lastTouchY = 0;
 
 const uint8_t ICON_PLAY[] PROGMEM = {
   0b00000000, 0b00000000,
@@ -114,19 +138,42 @@ void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int val
 bool processCommand(char *line, Stream &reply);
 
 const char *STARTUP_DEMO_SCRIPT[] = {
-  "CL|0x0000",
-  "TW|1|18|14|444|78|NXT Display|UART command renderer|0x0010|0x0010",
-  "TX|1|126|38|ESP32 GUI DISPLAY|0xFFFF|0x0010|4",
-  "TX|2|154|70|BT TX TW SB BM demo|0xFFFF|0x0010|2",
-  "BM|3|382|22|wifi|0x07FF|0x0001|2",
-  "BT|1|44|118|132|48|START|0x0320|0x07E0|0xFFFF",
-  "BM|1|58|134|play|0xFFFF|0x0001|1",
-  "BT|2|196|118|132|48|STOP|0x7800|0xF800|0xFFFF",
-  "BM|2|210|134|stop|0xFFFF|0x0001|1",
-  "BT|3|348|118|88|48|OK|0x001F|0x07FF|0xFFFF",
-  "TW|2|36|194|372|82|Status|Script demo executed through parser.|0x4208|0x0010",
-  "SB|1|424|194|14|82|V|35|100|0x0000|0x07FF",
-  "SB|2|36|286|372|14|H|70|100|0x0000|0xFD20"
+  "CL|0x2104",
+  "TX|1|16|10|MASH3 GRBL|0xBFFF|0x2104|4",
+  "BX|1|288|8|182|40|0xA965|0xFBEF|4",
+  "TX|2|304|17|USB WAIT|0xFFFF|0xA965|2",
+  "BX|2|10|54|225|46|0x18E3|0x0000|0",
+  "BX|3|10|54|42|46|0x05FF|0x05FF|0",
+  "TX|3|18|61|X|0x0000|0x05FF|9",
+  "TX|4|96|60|+0.00|0xBFFF|0x18E3|4",
+  "BX|4|245|54|225|46|0x18E3|0x0000|0",
+  "BX|5|245|54|42|46|0x07E8|0x07E8|0",
+  "TX|5|253|61|Y|0x0000|0x07E8|9",
+  "TX|6|331|60|+0.00|0xBFFF|0x18E3|4",
+  "BX|6|10|105|225|46|0x18E3|0x0000|0",
+  "BX|7|10|105|42|46|0xF81F|0xF81F|0",
+  "TX|7|18|112|Z|0x0000|0xF81F|9",
+  "TX|8|96|111|+0.00|0xBFFF|0x18E3|4",
+  "BX|8|245|105|225|46|0x18E3|0x0000|0",
+  "BX|9|245|105|42|46|0xC600|0xC600|0",
+  "TX|9|253|112|A|0x0000|0xC600|9",
+  "TX|10|331|111|+0.00|0xBFFF|0x18E3|4",
+  "TX|11|10|163|LIMITS|0xBFFF|0x2104|2",
+  "BX|10|105|158|38|34|0x2104|0xBFFF|0",
+  "TX|12|118|166|X|0xBFFF|0x2104|2",
+  "BX|11|147|158|38|34|0x2104|0xBFFF|0",
+  "TX|13|160|166|Y|0xBFFF|0x2104|2",
+  "BX|12|189|158|38|34|0x2104|0xBFFF|0",
+  "TX|14|202|166|Z|0xBFFF|0x2104|2",
+  "BX|13|231|158|38|34|0x2104|0xBFFF|0",
+  "TX|15|244|166|P|0xBFFF|0x2104|2",
+  "TX|16|310|163|SPINDLE  0 RPM|0xFDD7|0x2104|2",
+  "BX|14|55|199|185|40|0xF2B4|0x0000|0",
+  "TX|17|89|205|ALARM|0x4000|0xF2B4|4",
+  "BT|1|10|246|109|70|FLUID|0x21C7|0x863B|0xFFFF",
+  "BT|2|127|246|109|70|SPINDLE|0x3146|0xDCD2|0xFFFF",
+  "BT|3|244|246|109|70|PAUSE|0x4200|0xFE00|0xFFFF",
+  "BT|4|361|246|109|70|UNLOCK|0x4000|0xF882|0xFFFF"
 };
 
 void updateHeartbeat()
@@ -189,7 +236,7 @@ bool isNumericFontText(const char *text)
 
 int resolveTextFont(const char *text, int requestedFont)
 {
-  requestedFont = constrain(requestedFont, 1, 8);
+  requestedFont = constrain(requestedFont, 1, 9);
 
   if ((requestedFont == 6 || requestedFont == 7 || requestedFont == 8) && !isNumericFontText(text)) {
     return 4;
@@ -202,6 +249,38 @@ void sendAck(Stream &stream, const char *command, bool ok)
 {
   stream.print(ok ? "OK|" : "ERR|");
   stream.println(command);
+}
+
+void printHelp(Stream &stream)
+{
+  stream.println("NXT Display commands (fields are separated by |):");
+  stream.println("  HELP or ?");
+  stream.println("    Show this command list.");
+  stream.println("  TF");
+  stream.println("    Show all loaded TFT_eSPI and GFX font samples.");
+  stream.println("  CL|color");
+  stream.println("    Clear screen. Example: CL|0x0000");
+  stream.println("  BL|0/1");
+  stream.println("    Backlight off/on. Example: BL|1");
+  stream.println("  IV|0/1");
+  stream.println("    Display inversion off/on. Example: IV|1");
+  stream.println("  BT|id|x|y|w|h|label|fill|outline|text");
+  stream.println("    Draw button. Example: BT|1|20|20|120|50|OK|0x001F|0xFFFF|0xFFFF");
+  stream.println("    Touch events: EV|BT|id|DOWN/UP/CLICK|x|y");
+  stream.println("  BX|id|x|y|w|h|fill|outline|radius");
+  stream.println("    Draw filled box. Example: BX|1|10|10|100|40|0x2104|0xFFFF|4");
+  stream.println("  TX|id|x|y|text|color|background|font");
+  stream.println("    Draw text. Use background 0x0001 for transparency.");
+  stream.println("    Example: TX|1|20|90|Hello|0xFFFF|0x0001|2");
+  stream.println("  TW|id|x|y|w|h|title|text|fill|outline");
+  stream.println("    Draw text window.");
+  stream.println("  SB|id|x|y|w|h|H/V|value|max|track|thumb");
+  stream.println("    Draw horizontal or vertical scrollbar.");
+  stream.println("  BM|id|x|y|name|foreground|background|scale");
+  stream.println("    Draw bitmap. Names: play, stop, wifi.");
+  stream.println("    Use background 0x0001 for transparency.");
+  stream.println("Colors are RGB565 numbers, for example 0x0000 black and 0xFFFF white.");
+  stream.println("Legacy aliases: C, L, I, B, W, S, T.");
 }
 
 void setBacklight(bool enabled)
@@ -340,7 +419,91 @@ void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t 
   tft.setTextColor(text, fill);
   tft.drawString(label, x + w / 2, y + h / 2, 2);
 
+  size_t buttonIndex = uiButtonCount;
+  for (size_t i = 0; i < uiButtonCount; ++i) {
+    if (uiButtons[i].id == id) {
+      buttonIndex = i;
+      break;
+    }
+  }
+
+  if (buttonIndex == uiButtonCount) {
+    if (uiButtonCount >= MAX_UI_BUTTONS) {
+      Serial.printf("Button registry full; id=%d is display-only\n", id);
+      return;
+    }
+    ++uiButtonCount;
+  }
+
+  UiButton &button = uiButtons[buttonIndex];
+  button.id = id;
+  button.x = x;
+  button.y = y;
+  button.w = w;
+  button.h = h;
+  button.fill = fill;
+  button.outline = outline;
+  button.text = text;
+  strlcpy(button.label, label ? label : "", sizeof(button.label));
+
   Serial.printf("GUI button %d rendered\n", id);
+}
+
+void drawBox(int id, int x, int y, int w, int h, uint16_t fill, uint16_t outline, int radius)
+{
+  radius = constrain(radius, 0, min(w, h) / 2);
+  if (radius > 0) {
+    tft.fillRoundRect(x, y, w, h, radius, fill);
+    tft.drawRoundRect(x, y, w, h, radius, outline);
+  } else {
+    tft.fillRect(x, y, w, h, fill);
+    tft.drawRect(x, y, w, h, outline);
+  }
+
+  Serial.printf("GUI box %d rendered\n", id);
+}
+
+void drawFontTest()
+{
+  uiButtonCount = 0;
+  pressedButtonIndex = -1;
+  currentTouchButtonIndex = -1;
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("TF - loaded TFT_eSPI fonts", 8, 2, 2);
+
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("F1", 8, 24, 2);
+  tft.drawString("AaBbCcDd 012345", 42, 28, 1);
+
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("F2", 8, 43, 2);
+  tft.drawString("AaBbCcDd 012345", 42, 43, 2);
+
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("F4", 8, 65, 2);
+  tft.drawString("AaBbCcDd 012345", 42, 60, 4);
+
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.drawString("F6", 8, 96, 2);
+  tft.drawString("012345", 42, 86, 6);
+
+  tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+  tft.drawString("F7", 8, 148, 2);
+  tft.drawString("012345", 42, 138, 7);
+
+  tft.setTextColor(TFT_SKYBLUE, TFT_BLACK);
+  tft.drawString("F8", 8, 218, 2);
+  tft.drawString("012345", 42, 188, 8);
+
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("B18", 8, 286, 2);
+  tft.setFreeFont(&FreeSansBold18pt8b);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("AaBb 0123", 52, 280);
+  tft.setTextFont(1);
 }
 
 void drawTextWindow(int id, int x, int y, int w, int h, const char *title, const char *text, uint16_t fill, uint16_t outline)
@@ -433,13 +596,24 @@ void drawTextLabel(int id, int x, int y, const char *text, uint16_t color, uint1
 {
   int resolvedFont = resolveTextFont(text, font);
 
+  if (resolvedFont == 4) {
+    x += LARGE_FONT_X_CORRECTION;
+    y += LARGE_FONT_Y_CORRECTION;
+  }
+
   tft.setTextDatum(TL_DATUM);
   if (background == COLOR_TRANSPARENT) {
     tft.setTextColor(color);
   } else {
     tft.setTextColor(color, background);
   }
-  tft.drawString(text, x, y, resolvedFont);
+  if (resolvedFont == 9) {
+    tft.setFreeFont(&FreeSansBold18pt8b);
+    tft.drawString(text, x, y);
+    tft.setTextFont(1);
+  } else {
+    tft.drawString(text, x, y, resolvedFont);
+  }
 
   Serial.printf("GUI text %d rendered font=%d\n", id, resolvedFont);
 }
@@ -478,6 +652,87 @@ bool readTouchPoint(uint16_t &x, uint16_t &y)
   return true;
 }
 
+int findTouchedButton(uint16_t x, uint16_t y)
+{
+  for (int i = static_cast<int>(uiButtonCount) - 1; i >= 0; --i) {
+    const UiButton &button = uiButtons[i];
+    if (x >= button.x && x < button.x + button.w && y >= button.y && y < button.y + button.h) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+void drawButtonPressedState(int buttonIndex, bool pressed)
+{
+  if (buttonIndex < 0 || buttonIndex >= static_cast<int>(uiButtonCount)) {
+    return;
+  }
+
+  const UiButton &button = uiButtons[buttonIndex];
+  uint16_t color = pressed ? TFT_WHITE : button.outline;
+  tft.drawRoundRect(button.x, button.y, button.w, button.h, 6, color);
+  tft.drawRoundRect(button.x + 1, button.y + 1, button.w - 2, button.h - 2, 5, color);
+}
+
+void writeButtonEvent(Stream &stream, const UiButton &button, const char *event, uint16_t x, uint16_t y)
+{
+  stream.print("EV|BT|");
+  stream.print(button.id);
+  stream.print('|');
+  stream.print(event);
+  stream.print('|');
+  stream.print(x);
+  stream.print('|');
+  stream.println(y);
+}
+
+void emitButtonEvent(int buttonIndex, const char *event, uint16_t x, uint16_t y)
+{
+  if (buttonIndex < 0 || buttonIndex >= static_cast<int>(uiButtonCount)) {
+    return;
+  }
+
+  const UiButton &button = uiButtons[buttonIndex];
+  writeButtonEvent(Serial, button, event, x, y);
+  writeButtonEvent(UiSerial, button, event, x, y);
+}
+
+void updateTouchButtons()
+{
+  static uint32_t lastPoll = 0;
+  uint32_t now = millis();
+  if (now - lastPoll < TOUCH_POLL_INTERVAL_MS) {
+    return;
+  }
+  lastPoll = now;
+
+  uint16_t x;
+  uint16_t y;
+  if (!readTouchPoint(x, y)) {
+    if (pressedButtonIndex >= 0) {
+      drawButtonPressedState(pressedButtonIndex, false);
+      emitButtonEvent(pressedButtonIndex, "UP", lastTouchX, lastTouchY);
+      if (currentTouchButtonIndex == pressedButtonIndex) {
+        emitButtonEvent(pressedButtonIndex, "CLICK", lastTouchX, lastTouchY);
+      }
+    }
+    pressedButtonIndex = -1;
+    currentTouchButtonIndex = -1;
+    return;
+  }
+
+  lastTouchX = x;
+  lastTouchY = y;
+  currentTouchButtonIndex = findTouchedButton(x, y);
+
+  if (pressedButtonIndex < 0 && currentTouchButtonIndex >= 0) {
+    pressedButtonIndex = currentTouchButtonIndex;
+    drawButtonPressedState(pressedButtonIndex, true);
+    emitButtonEvent(pressedButtonIndex, "DOWN", x, y);
+  }
+}
+
 void drawStartupScreen()
 {
   setBacklight(true);
@@ -499,9 +754,27 @@ bool processCommand(char *line, Stream &reply)
     return false;
   }
 
+  for (char *p = command; *p != '\0'; ++p) {
+    *p = static_cast<char>(toupper(static_cast<unsigned char>(*p)));
+  }
+
+  if (strcmp(command, "HELP") == 0 || strcmp(command, "?") == 0) {
+    printHelp(reply);
+    return true;
+  }
+
+  if (strcmp(command, "TF") == 0) {
+    drawFontTest();
+    sendAck(reply, original, true);
+    return true;
+  }
+
   if (strcmp(command, "C") == 0 || strcmp(command, "CL") == 0) {
     uint16_t color = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     tft.fillScreen(color);
+    uiButtonCount = 0;
+    pressedButtonIndex = -1;
+    currentTouchButtonIndex = -1;
     sendAck(reply, original, true);
     return true;
   }
@@ -516,6 +789,20 @@ bool processCommand(char *line, Stream &reply)
   if (strcmp(command, "I") == 0 || strcmp(command, "IV") == 0) {
     int enabled = parseIntField(strtok(nullptr, "|"), 1);
     tft.invertDisplay(enabled != 0);
+    sendAck(reply, original, true);
+    return true;
+  }
+
+  if (strcmp(command, "BX") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    int w = parseIntField(strtok(nullptr, "|"));
+    int h = parseIntField(strtok(nullptr, "|"));
+    uint16_t fill = parseColor(strtok(nullptr, "|"), TFT_BLACK);
+    uint16_t outline = parseColor(strtok(nullptr, "|"), fill);
+    int radius = parseIntField(strtok(nullptr, "|"), 0);
+    drawBox(id, x, y, w, h, fill, outline, radius);
     sendAck(reply, original, true);
     return true;
   }
@@ -673,6 +960,7 @@ void loop()
       return;
     }
   }
+  updateTouchButtons();
   readCommandStream(Serial, usbCommand, usbCommandLength);
   readCommandStream(UiSerial, uartCommand, uartCommandLength);
 }
