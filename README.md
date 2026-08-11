@@ -88,12 +88,13 @@ Colors are RGB565 values. You can send decimal values or hex values such as `0x0
 | Command | Meaning |
 | --- | --- |
 | `CL|color` | Clear screen |
-| `BT|id|x|y|w|h|label|fill|outline|text` | Draw button |
+| `BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V` | Draw button |
 | `TW|id|x|y|w|h|title|text|fill|outline` | Draw text window |
 | `SB|id|x|y|w|h|H/V|value|max|track|thumb` | Draw scroll bar |
-| `TX|id|x|y|text|color|background|font` | Draw text label |
+| `TX|id|x|y|text|color|background|font|w|h|H|V` | Draw text label |
 | `BM|id|x|y|name|foreground|background|scale` | Draw built-in bitmap |
 | `JPG|id|x|y|path|scale` | Draw a JPEG file from microSD; scale is 1, 2, 4, or 8 |
+| `SC|path` | Run a text script from microSD |
 | `SD` | Show microSD status and capacity |
 | `LS|path` | List files in a microSD directory |
 | `BL|1` / `BL|0` | Backlight on/off |
@@ -123,9 +124,31 @@ SB|1|300|150|12|120|V|50|100|0x0000|0x07FF
 TX|1|30|300|Hello ESP32|0xFFE0|0x0000|4
 BM|1|30|30|wifi|0x07FF|0x0001|2
 JPG|2|80|40|/icons/play.jpg|1
+SC|/scripts/demo.nxt
 ```
 
 Store JPEG assets in a directory such as `/icons` on the microSD card. Baseline JPEG files are the safest choice; progressive JPEG is not supported by the decoder. The image is drawn at its native size divided by the selected scale, with `x` and `y` specifying its top-left corner.
+
+## Local SD card image
+
+The repository contains an `sd` folder that mirrors the physical microSD card.
+Prepare images and scripts there on the desktop, then copy the contents of
+`sd` to the root of the card.
+
+Recommended layout:
+
+```text
+sd/icons    -> /icons
+sd/images   -> /images
+sd/scripts  -> /scripts
+```
+
+Scripts are plain text files with one GUI command per line. Empty lines and
+lines starting with `#` are ignored. A script can be started from serial/UART:
+
+```text
+SC|/scripts/demo.nxt
+```
 
 ## Build and upload
 

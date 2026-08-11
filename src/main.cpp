@@ -5,7 +5,8 @@
 #include <TFT_eSPI.h>
 #include <TJpg_Decoder.h>
 #include <WiFi.h>
-#include <FontsRus/FreeSansBold18.h>
+#include <WiFiUdp.h>
+#include "gui_fonts.h"
 
 #if __has_include("ota_secrets.h")
 #include "ota_secrets.h"
@@ -25,6 +26,7 @@ constexpr uint8_t UI_UART_TX = 17;
 constexpr uint8_t SD_CS_PIN = 27;
 constexpr uint32_t SD_SPI_FREQUENCY = 4000000;
 constexpr uint32_t UI_UART_BAUD = 115200;
+constexpr uint16_t GUI_UDP_PORT = 4210;
 constexpr size_t COMMAND_BUFFER_SIZE = 192;
 constexpr uint16_t TOUCH_THRESHOLD = 250;
 constexpr bool DISPLAY_INVERTED = true;
@@ -32,9 +34,8 @@ constexpr bool TOUCH_INVERT_X = true;
 constexpr int16_t TOUCH_LEFT_EDGE_X_CORRECTION = 20;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION = 6;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION_RANGE = 140;
-constexpr int16_t LARGE_FONT_X_CORRECTION = 3;
-constexpr int16_t LARGE_FONT_Y_CORRECTION = 4;
 constexpr uint16_t COLOR_TRANSPARENT = 0x0001;
+constexpr int16_t GFX_FONT_Y_CORRECTION = -3;
 constexpr char OTA_HOSTNAME[] = "nxt-display";
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t TOUCH_POLL_INTERVAL_MS = 25;
@@ -54,13 +55,28 @@ struct UiButton {
 };
 
 HardwareSerial UiSerial(2);
+WiFiUDP GuiUdp;
 char usbCommand[COMMAND_BUFFER_SIZE];
 char uartCommand[COMMAND_BUFFER_SIZE];
+char udpCommand[COMMAND_BUFFER_SIZE];
 size_t usbCommandLength = 0;
 size_t uartCommandLength = 0;
 bool otaReady = false;
 bool otaInProgress = false;
 bool sdReady = false;
+bool udpReady = false;
+File sdUploadFile;
+String sdUploadPath;
+size_t sdUploadExpectedSize = 0;
+size_t sdUploadWrittenSize = 0;
+bool jpegClipActive = false;
+int16_t jpegClipX = 0;
+int16_t jpegClipY = 0;
+int16_t jpegClipW = 0;
+int16_t jpegClipH = 0;
+int16_t jpegTargetX = 0;
+int16_t jpegTargetY = 0;
+int16_t jpegOutputZoom = 1;
 int otaDisplayedPercent = -1;
 UiButton uiButtons[MAX_UI_BUTTONS];
 size_t uiButtonCount = 0;
@@ -140,7 +156,13 @@ const BitmapAsset BITMAP_ASSETS[] = {
 };
 
 void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb);
-bool processCommand(char *line, Stream &reply);
+void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb);
+void drawProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t fill, uint16_t background, uint16_t outline);
+void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t knob, uint16_t outline, uint16_t onFill);
+void drawAlignedTextBox(const char *text, int x, int y, int w, int h, uint16_t color,
+                        uint16_t background, int font, char hAlign, char vAlign,
+                        bool fillBackground);
+bool processCommand(char *line, Print &reply);
 
 const char *STARTUP_DEMO_SCRIPT[] = {
   "CL|0x2104",
@@ -213,6 +235,20 @@ uint16_t parseColor(const char *value, uint16_t fallback)
   return static_cast<uint16_t>(color);
 }
 
+uint16_t lightenRgb565(uint16_t color, uint8_t amount)
+{
+  amount = min<uint8_t>(amount, 100);
+  uint8_t r = (color >> 11) & 0x1F;
+  uint8_t g = (color >> 5) & 0x3F;
+  uint8_t b = color & 0x1F;
+
+  r += ((31 - r) * amount) / 100;
+  g += ((63 - g) * amount) / 100;
+  b += ((31 - b) * amount) / 100;
+
+  return (static_cast<uint16_t>(r) << 11) | (static_cast<uint16_t>(g) << 5) | b;
+}
+
 int parseIntField(const char *value, int fallback = 0)
 {
   if (value == nullptr || value[0] == '\0') {
@@ -220,6 +256,37 @@ int parseIntField(const char *value, int fallback = 0)
   }
 
   return atoi(value);
+}
+
+void parseJpegScale(const char *value, int &decoderScale, int &outputZoom)
+{
+  decoderScale = 1;
+  outputZoom = 1;
+  if (value == nullptr || value[0] == '\0' || strcmp(value, "1") == 0 || strcmp(value, "1/1") == 0) {
+    return;
+  }
+
+  if (strcmp(value, "1/4") == 0) {
+    decoderScale = 4;
+    return;
+  }
+  if (strcmp(value, "1/2") == 0) {
+    decoderScale = 2;
+    return;
+  }
+  if (strcmp(value, "2/1") == 0) {
+    outputZoom = 2;
+    return;
+  }
+  if (strcmp(value, "4/1") == 0) {
+    outputZoom = 4;
+    return;
+  }
+
+  int legacy = parseIntField(value, 1);
+  if (legacy == 2 || legacy == 4 || legacy == 8) {
+    decoderScale = legacy;
+  }
 }
 
 bool isNumericFontText(const char *text)
@@ -241,26 +308,54 @@ bool isNumericFontText(const char *text)
 
 int resolveTextFont(const char *text, int requestedFont)
 {
-  requestedFont = constrain(requestedFont, 1, 9);
-
-  if ((requestedFont == 6 || requestedFont == 7 || requestedFont == 8) && !isNumericFontText(text)) {
-    return 4;
-  }
-
-  return requestedFont;
+  return constrain(requestedFont, 1, GUI_FONT_COUNT);
 }
 
-void sendAck(Stream &stream, const char *command, bool ok)
+void mapCp1251ToRusFont(const char *text, char *out, size_t outSize)
+{
+  if (outSize == 0) {
+    return;
+  }
+
+  size_t j = 0;
+  if (text != nullptr) {
+    for (size_t i = 0; text[i] != '\0' && j < outSize - 1; ++i) {
+      uint8_t c = static_cast<uint8_t>(text[i]);
+      if (c == 168) {
+        c = 192;
+      } else if (c == 184) {
+        c = 193;
+      } else if (c >= 192 && c <= 239) {
+        c -= 48;
+      } else if (c >= 240) {
+        c -= 112;
+      }
+      out[j++] = static_cast<char>(c);
+    }
+  }
+  out[j] = '\0';
+}
+
+void sendAck(Print &stream, const char *command, bool ok)
 {
   stream.print(ok ? "OK|" : "ERR|");
   stream.println(command);
 }
 
-void printHelp(Stream &stream)
+void sendReady(Print &stream)
+{
+  stream.println("ready");
+}
+
+void printHelp(Print &stream)
 {
   stream.println("NXT Display commands (fields are separated by |):");
-  stream.println("  HELP or ?");
+  stream.println("  HELP");
   stream.println("    Show this command list.");
+  stream.println("  ?");
+  stream.println("    Reply with ready.");
+  stream.println("  SHOWIP");
+  stream.println("    Reply with current Wi-Fi IP and UDP port.");
   stream.println("  TF");
   stream.println("    Show all loaded TFT_eSPI and GFX font samples.");
   stream.println("  CL|color");
@@ -269,16 +364,27 @@ void printHelp(Stream &stream)
   stream.println("    Backlight off/on. Example: BL|1");
   stream.println("  IV|0/1");
   stream.println("    Display inversion off/on. Example: IV|1");
-  stream.println("  BT|id|x|y|w|h|label|fill|outline|text");
-  stream.println("    Draw button. Example: BT|1|20|20|120|50|OK|0x001F|0xFFFF|0xFFFF");
+  stream.println("  BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V");
+  stream.println("    Draw button. H=L/C/R, V=T/C/B. Optional fields default to 1|2|C|C.");
+  stream.println("    Example: BT|1|20|20|120|50|OK|0x001F|0xFFFF|0xFFFF|2|2|C|C");
   stream.println("    Touch events: EV|BT|id|DOWN/UP/CLICK|x|y");
-  stream.println("  BX|id|x|y|w|h|fill|outline|radius");
-  stream.println("    Draw filled box. Example: BX|1|10|10|100|40|0x2104|0xFFFF|4");
-  stream.println("  TX|id|x|y|text|color|background|font");
-  stream.println("    Draw text. Use background 0x0001 for transparency.");
-  stream.println("    Example: TX|1|20|90|Hello|0xFFFF|0x0001|2");
+  stream.println("  BX|id|x|y|w|h|fill|outline|radius|line");
+  stream.println("    Draw box. Use fill 0x0001 for no fill.");
+  stream.println("  RR|id|x|y|w|h|fill|outline|radius|line");
+  stream.println("    Draw rounded rectangle. Example: RR|1|10|10|100|40|0x0001|0xFFFF|8|2");
+  stream.println("  TX|id|x|y|text|color|background|font|w|h|H|V");
+  stream.println("    Draw text. Use background 0x0001 for transparency. H=L/C/R, V=T/C/B.");
+  stream.println("    Example: TX|1|20|90|Hello|0xFFFF|0x0001|2|120|30|C|C");
   stream.println("  TW|id|x|y|w|h|title|text|fill|outline");
-  stream.println("    Draw text window.");
+  stream.println("    Draw text window. Use fill 0x0001 for transparent body.");
+  stream.println("  TR|id|x|y|w|h|value|max|track|thumb");
+  stream.println("    Draw horizontal trackbar.");
+  stream.println("  PB|id|x|y|w|h|percent|fill|background|outline");
+  stream.println("    Draw horizontal progress bar.");
+  stream.println("  CC|id|x|y|diameter|fill|outline|line");
+  stream.println("    Draw circle. Use fill 0x0001 for no fill.");
+  stream.println("  SW|id|x|y|w|h|0/1|knob|outline|onfill");
+  stream.println("    Draw switch. 0 is off/left, 1 is on/right.");
   stream.println("  SB|id|x|y|w|h|H/V|value|max|track|thumb");
   stream.println("    Draw horizontal or vertical scrollbar.");
   stream.println("  BM|id|x|y|name|foreground|background|scale");
@@ -288,14 +394,20 @@ void printHelp(Stream &stream)
   stream.println("    Show microSD status and capacity.");
   stream.println("  LS|path");
   stream.println("    List files in a microSD directory. Example: LS|/");
-  stream.println("  JPG|id|x|y|path|scale");
-  stream.println("    Draw a JPEG from microSD. Scale: 1, 2, 4, or 8.");
-  stream.println("    Example: JPG|1|20|20|/icons/play.jpg|1");
+  stream.println("  FS|path");
+  stream.println("    Show one microSD file size. Example: FS|/lcd2.jpg");
+  stream.println("  JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH");
+  stream.println("    Draw a JPEG or selected source area. Scale: 1/4, 1/2, 1/1, 2/1, 4/1.");
+  stream.println("    Example: JPG|1|20|20|/icons/play.jpg|1/2|0|0|64|64");
+  stream.println("  FW|path|size, FD|hex, FE");
+  stream.println("    Write a file to microSD through serial.");
+  stream.println("  SC|path");
+  stream.println("    Run a text script from microSD. Example: SC|/scripts/demo.nxt");
   stream.println("Colors are RGB565 numbers, for example 0x0000 black and 0xFFFF white.");
   stream.println("Legacy aliases: C, L, I, B, W, S, T.");
 }
 
-void printSdStatus(Stream &stream)
+void printSdStatus(Print &stream)
 {
   if (!sdReady) {
     stream.println("SD|NOT_READY");
@@ -307,7 +419,7 @@ void printSdStatus(Stream &stream)
                 SD.usedBytes() / (1024ULL * 1024ULL));
 }
 
-bool listSdDirectory(const char *path, Stream &stream)
+bool listSdDirectory(const char *path, Print &stream)
 {
   if (!sdReady) {
     stream.println("ERR|sd_not_ready");
@@ -340,18 +452,93 @@ bool listSdDirectory(const char *path, Stream &stream)
   return true;
 }
 
-bool jpegOutput(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *pixels)
+bool printSdFileSize(const char *path, Print &stream)
 {
-  if (y >= tft.height() || x >= tft.width()) {
+  if (!sdReady) {
+    stream.println("ERR|fs|sd_not_ready");
+    return false;
+  }
+  if (path == nullptr || path[0] == '\0') {
+    stream.println("ERR|fs|missing_path");
     return false;
   }
 
-  tft.pushImage(x, y, w, h, pixels);
+  String resolvedPath = path[0] == '/' ? String(path) : String('/') + path;
+  File file = SD.open(resolvedPath, FILE_READ);
+  if (!file || file.isDirectory()) {
+    stream.print("ERR|fs|not_found|");
+    stream.println(resolvedPath);
+    if (file) {
+      file.close();
+    }
+    return false;
+  }
+
+  stream.printf("OK|FS|%s|%u\n", resolvedPath.c_str(), static_cast<unsigned>(file.size()));
+  file.close();
   return true;
 }
 
-bool drawSdJpeg(int id, int x, int y, const char *path, int scale, Stream &reply)
+bool jpegOutput(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *pixels)
 {
+  int zoom = max<int>(1, jpegOutputZoom);
+  int32_t clipLeft = 0;
+  int32_t clipTop = 0;
+  int32_t clipRight = tft.width();
+  int32_t clipBottom = tft.height();
+  if (jpegClipActive) {
+    clipLeft = max<int32_t>(clipLeft, jpegClipX);
+    clipTop = max<int32_t>(clipTop, jpegClipY);
+    clipRight = min<int32_t>(clipRight, jpegClipX + jpegClipW);
+    clipBottom = min<int32_t>(clipBottom, jpegClipY + jpegClipH);
+  }
+
+  int32_t blockLeft = jpegTargetX + (static_cast<int32_t>(x) - jpegTargetX) * zoom;
+  int32_t blockTop = jpegTargetY + (static_cast<int32_t>(y) - jpegTargetY) * zoom;
+  int32_t blockRight = blockLeft + static_cast<int32_t>(w) * zoom;
+  int32_t blockBottom = blockTop + static_cast<int32_t>(h) * zoom;
+
+  if (blockRight <= clipLeft || blockBottom <= clipTop || blockLeft >= clipRight || blockTop >= clipBottom) {
+    return true;
+  }
+
+  int16_t visibleLeft = max<int32_t>(blockLeft, clipLeft);
+  int16_t visibleTop = max<int32_t>(blockTop, clipTop);
+  int16_t visibleRight = min<int32_t>(blockRight, clipRight);
+  int16_t visibleBottom = min<int32_t>(blockBottom, clipBottom);
+  uint16_t visibleWidth = visibleRight - visibleLeft;
+  uint16_t visibleHeight = visibleBottom - visibleTop;
+  uint16_t sourceLeft = (visibleLeft - blockLeft) / zoom;
+  uint16_t sourceTop = (visibleTop - blockTop) / zoom;
+
+  if (zoom == 1) {
+    for (uint16_t row = 0; row < visibleHeight; ++row) {
+      uint16_t *rowPixels = pixels + (sourceTop + row) * w + sourceLeft;
+      tft.pushImage(visibleLeft, visibleTop + row, visibleWidth, 1, rowPixels);
+    }
+    return true;
+  }
+
+  static uint16_t scaledRow[256];
+  if (visibleWidth > sizeof(scaledRow) / sizeof(scaledRow[0])) {
+    return true;
+  }
+  for (uint16_t row = 0; row < visibleHeight; ++row) {
+    uint16_t srcRow = (visibleTop + row - blockTop) / zoom;
+    for (uint16_t col = 0; col < visibleWidth; ++col) {
+      uint16_t srcCol = (visibleLeft + col - blockLeft) / zoom;
+      scaledRow[col] = pixels[srcRow * w + srcCol];
+    }
+    tft.pushImage(visibleLeft, visibleTop + row, visibleWidth, 1, scaledRow);
+  }
+  return true;
+}
+
+bool drawSdJpeg(int id, int x, int y, const char *path, const char *scaleText,
+                int srcX, int srcY, int srcW, int srcH, Print &reply)
+{
+  int decoderScale = 1;
+  int outputZoom = 1;
   if (!sdReady) {
     reply.println("ERR|jpg|sd_not_ready");
     return false;
@@ -369,20 +556,341 @@ bool drawSdJpeg(int id, int x, int y, const char *path, int scale, Stream &reply
     return false;
   }
 
-  if (scale != 1 && scale != 2 && scale != 4 && scale != 8) {
-    reply.println("ERR|jpg|invalid_scale");
-    return false;
+  parseJpegScale(scaleText, decoderScale, outputZoom);
+
+  int drawX = x;
+  int drawY = y;
+  jpegTargetX = x;
+  jpegTargetY = y;
+  jpegOutputZoom = outputZoom;
+  jpegClipActive = srcW > 0 && srcH > 0;
+  if (jpegClipActive) {
+    jpegClipX = x;
+    jpegClipY = y;
+    jpegClipW = max(1, (srcW + decoderScale - 1) / decoderScale * outputZoom);
+    jpegClipH = max(1, (srcH + decoderScale - 1) / decoderScale * outputZoom);
+    drawX = x - (srcX / decoderScale);
+    drawY = y - (srcY / decoderScale);
   }
 
-  TJpgDec.setJpgScale(scale);
-  JRESULT result = TJpgDec.drawSdJpg(x, y, resolvedPath);
+  TJpgDec.setJpgScale(decoderScale);
+  JRESULT result = TJpgDec.drawSdJpg(drawX, drawY, resolvedPath);
+  jpegClipActive = false;
+  jpegOutputZoom = 1;
   if (result != JDR_OK) {
     reply.printf("ERR|jpg|decode|%d|%s\n", static_cast<int>(result), resolvedPath.c_str());
     return false;
   }
 
-  Serial.printf("GUI JPEG %d rendered path=%s scale=%d\n", id, resolvedPath.c_str(), scale);
+  Serial.printf("GUI JPEG %d rendered path=%s scale=%s\n", id, resolvedPath.c_str(),
+                scaleText ? scaleText : "1/1");
   return true;
+}
+
+bool ensureSdParentDirectory(const String &path)
+{
+  int slash = path.lastIndexOf('/');
+  if (slash <= 0) {
+    return true;
+  }
+
+  String current;
+  String parent = path.substring(0, slash);
+  int start = 1;
+  while (start < parent.length()) {
+    int next = parent.indexOf('/', start);
+    String part = next < 0 ? parent.substring(start) : parent.substring(start, next);
+    if (part.length() > 0) {
+      current += '/';
+      current += part;
+      if (!SD.exists(current) && !SD.mkdir(current)) {
+        return false;
+      }
+    }
+    if (next < 0) {
+      break;
+    }
+    start = next + 1;
+  }
+  return true;
+}
+
+int hexNibble(char value)
+{
+  if (value >= '0' && value <= '9') {
+    return value - '0';
+  }
+  if (value >= 'A' && value <= 'F') {
+    return value - 'A' + 10;
+  }
+  if (value >= 'a' && value <= 'f') {
+    return value - 'a' + 10;
+  }
+  return -1;
+}
+
+bool beginSdUpload(const char *path, size_t expectedSize, Print &reply)
+{
+  if (!sdReady) {
+    reply.println("ERR|fw|sd_not_ready");
+    return false;
+  }
+  if (path == nullptr || path[0] == '\0') {
+    reply.println("ERR|fw|missing_path");
+    return false;
+  }
+
+  if (sdUploadFile) {
+    sdUploadFile.close();
+  }
+
+  sdUploadPath = path[0] == '/' ? String(path) : String('/') + path;
+  sdUploadExpectedSize = expectedSize;
+  sdUploadWrittenSize = 0;
+
+  if (!ensureSdParentDirectory(sdUploadPath)) {
+    reply.print("ERR|fw|mkdir|");
+    reply.println(sdUploadPath);
+    return false;
+  }
+
+  if (SD.exists(sdUploadPath)) {
+    SD.remove(sdUploadPath);
+  }
+
+  sdUploadFile = SD.open(sdUploadPath, FILE_WRITE);
+  if (!sdUploadFile) {
+    reply.print("ERR|fw|open|");
+    reply.println(sdUploadPath);
+    return false;
+  }
+
+  reply.printf("OK|FW|%s|%u\n", sdUploadPath.c_str(), static_cast<unsigned>(sdUploadExpectedSize));
+  return true;
+}
+
+bool writeSdUploadHex(const char *hexData, Print &reply)
+{
+  uint8_t buffer[64];
+  size_t count = 0;
+
+  if (!sdUploadFile) {
+    reply.println("ERR|fd|not_open");
+    return false;
+  }
+  if (hexData == nullptr) {
+    reply.println("ERR|fd|missing_data");
+    return false;
+  }
+
+  size_t len = strlen(hexData);
+  if ((len & 1) != 0 || len > sizeof(buffer) * 2) {
+    reply.println("ERR|fd|invalid_length");
+    return false;
+  }
+
+  for (size_t i = 0; i < len; i += 2) {
+    int hi = hexNibble(hexData[i]);
+    int lo = hexNibble(hexData[i + 1]);
+    if (hi < 0 || lo < 0) {
+      reply.println("ERR|fd|invalid_hex");
+      return false;
+    }
+    buffer[count++] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+
+  if (count > 0 && sdUploadFile.write(buffer, count) != count) {
+    reply.println("ERR|fd|write");
+    sdUploadFile.close();
+    return false;
+  }
+  sdUploadWrittenSize += count;
+  reply.printf("OK|FD|%u\n", static_cast<unsigned>(sdUploadWrittenSize));
+  return true;
+}
+
+bool decodeUploadHex(const char *hexData, uint8_t *buffer, size_t bufferSize, size_t &count, Print &reply)
+{
+  count = 0;
+  if (hexData == nullptr) {
+    reply.println("ERR|fd|missing_data");
+    return false;
+  }
+
+  size_t len = strlen(hexData);
+  if ((len & 1) != 0 || len > bufferSize * 2) {
+    reply.println("ERR|fd|invalid_length");
+    return false;
+  }
+
+  for (size_t i = 0; i < len; i += 2) {
+    int hi = hexNibble(hexData[i]);
+    int lo = hexNibble(hexData[i + 1]);
+    if (hi < 0 || lo < 0) {
+      reply.println("ERR|fd|invalid_hex");
+      return false;
+    }
+    buffer[count++] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+  return true;
+}
+
+bool writeSdUploadHexAt(size_t expectedOffset, const char *hexData, Print &reply)
+{
+  uint8_t buffer[64];
+  size_t count = 0;
+
+  if (!sdUploadFile) {
+    reply.println("ERR|fdo|not_open");
+    return false;
+  }
+  if (!decodeUploadHex(hexData, buffer, sizeof(buffer), count, reply)) {
+    return false;
+  }
+
+  if (expectedOffset < sdUploadWrittenSize) {
+    if (expectedOffset + count <= sdUploadWrittenSize) {
+      reply.printf("OK|FDO|%u\n", static_cast<unsigned>(sdUploadWrittenSize));
+      return true;
+    }
+    reply.printf("ERR|fdo|overlap|%u|%u\n",
+                 static_cast<unsigned>(expectedOffset),
+                 static_cast<unsigned>(sdUploadWrittenSize));
+    return false;
+  }
+
+  if (expectedOffset != sdUploadWrittenSize) {
+    reply.printf("ERR|fdo|offset|%u|%u\n",
+                 static_cast<unsigned>(expectedOffset),
+                 static_cast<unsigned>(sdUploadWrittenSize));
+    return false;
+  }
+
+  if (count > 0 && sdUploadFile.write(buffer, count) != count) {
+    reply.println("ERR|fdo|write");
+    sdUploadFile.close();
+    return false;
+  }
+  sdUploadWrittenSize += count;
+  reply.printf("OK|FDO|%u\n", static_cast<unsigned>(sdUploadWrittenSize));
+  return true;
+}
+
+bool endSdUpload(Print &reply)
+{
+  if (!sdUploadFile) {
+    reply.println("ERR|fe|not_open");
+    return false;
+  }
+
+  sdUploadFile.flush();
+  sdUploadFile.close();
+
+  if (sdUploadExpectedSize != 0 && sdUploadWrittenSize != sdUploadExpectedSize) {
+    reply.printf("ERR|fe|size|%u|%u\n",
+                 static_cast<unsigned>(sdUploadWrittenSize),
+                 static_cast<unsigned>(sdUploadExpectedSize));
+    return false;
+  }
+
+  reply.printf("OK|FE|%s|%u\n", sdUploadPath.c_str(), static_cast<unsigned>(sdUploadWrittenSize));
+  sdUploadPath = "";
+  sdUploadExpectedSize = 0;
+  sdUploadWrittenSize = 0;
+  return true;
+}
+
+bool runSdScript(const char *path, Print &reply)
+{
+  if (!sdReady) {
+    reply.println("ERR|script|sd_not_ready");
+    return false;
+  }
+
+  if (path == nullptr || path[0] == '\0') {
+    reply.println("ERR|script|missing_path");
+    return false;
+  }
+
+  String resolvedPath = path[0] == '/' ? String(path) : String('/') + path;
+  if (!SD.exists(resolvedPath)) {
+    reply.print("ERR|script|not_found|");
+    reply.println(resolvedPath);
+    return false;
+  }
+
+  File script = SD.open(resolvedPath, FILE_READ);
+  if (!script || script.isDirectory()) {
+    reply.print("ERR|script|open|");
+    reply.println(resolvedPath);
+    if (script) {
+      script.close();
+    }
+    return false;
+  }
+
+  char buffer[COMMAND_BUFFER_SIZE];
+  size_t len = 0;
+  uint32_t lineNumber = 1;
+  bool ok = true;
+
+  auto executeLine = [&]() {
+    buffer[len] = '\0';
+    char *start = buffer;
+    while (*start != '\0' && isspace(static_cast<unsigned char>(*start))) {
+      ++start;
+    }
+
+    char *end = start + strlen(start);
+    while (end > start && isspace(static_cast<unsigned char>(*(end - 1)))) {
+      --end;
+    }
+    *end = '\0';
+
+    if (start[0] == '\0' || start[0] == '#') {
+      return true;
+    }
+
+    char commandBuffer[COMMAND_BUFFER_SIZE];
+    strlcpy(commandBuffer, start, sizeof(commandBuffer));
+    if (!processCommand(commandBuffer, reply)) {
+      reply.printf("ERR|script|line|%lu|%s\n", static_cast<unsigned long>(lineNumber), start);
+      return false;
+    }
+    return true;
+  };
+
+  while (script.available()) {
+    char c = static_cast<char>(script.read());
+    if (c == '\r') {
+      continue;
+    }
+    if (c == '\n') {
+      ok = executeLine();
+      if (!ok) {
+        break;
+      }
+      len = 0;
+      ++lineNumber;
+      continue;
+    }
+    if (len >= sizeof(buffer) - 1) {
+      reply.printf("ERR|script|line_too_long|%lu\n", static_cast<unsigned long>(lineNumber));
+      ok = false;
+      break;
+    }
+    buffer[len++] = c;
+  }
+
+  if (ok && len > 0) {
+    ok = executeLine();
+  }
+
+  script.close();
+  if (ok) {
+    reply.printf("OK|SC|%s\n", resolvedPath.c_str());
+  }
+  return ok;
 }
 
 void setBacklight(bool enabled)
@@ -510,16 +1018,21 @@ void startOta()
 
   ArduinoOTA.begin();
   otaReady = true;
+  udpReady = GuiUdp.begin(GUI_UDP_PORT) == 1;
   Serial.printf("OTA ready: %s.local, IP=%s\n", OTA_HOSTNAME, WiFi.localIP().toString().c_str());
+  Serial.printf("GUI UDP %s: port %u\n", udpReady ? "ready" : "error", GUI_UDP_PORT);
 }
 
-void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t fill, uint16_t outline, uint16_t text)
+void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t fill,
+                uint16_t outline, uint16_t text, int lineWidth, int font,
+                char hAlign, char vAlign)
 {
+  lineWidth = constrain(lineWidth, 1, 4);
   tft.fillRoundRect(x, y, w, h, 6, fill);
-  tft.drawRoundRect(x, y, w, h, 6, outline);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(text, fill);
-  tft.drawString(label, x + w / 2, y + h / 2, 2);
+  for (int i = 0; i < lineWidth; ++i) {
+    tft.drawRoundRect(x + i, y + i, w - i * 2, h - i * 2, max(0, 6 - i), outline);
+  }
+  drawAlignedTextBox(label, x, y, w, h, text, fill, font, hAlign, vAlign, false);
 
   size_t buttonIndex = uiButtonCount;
   for (size_t i = 0; i < uiButtonCount; ++i) {
@@ -551,15 +1064,25 @@ void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t 
   Serial.printf("GUI button %d rendered\n", id);
 }
 
-void drawBox(int id, int x, int y, int w, int h, uint16_t fill, uint16_t outline, int radius)
+void drawBox(int id, int x, int y, int w, int h, uint16_t fill, uint16_t outline, int radius, int lineWidth)
 {
+  lineWidth = constrain(lineWidth, 1, 4);
   radius = constrain(radius, 0, min(w, h) / 2);
+  bool transparentFill = fill == 0x0001;
   if (radius > 0) {
-    tft.fillRoundRect(x, y, w, h, radius, fill);
-    tft.drawRoundRect(x, y, w, h, radius, outline);
+    if (!transparentFill) {
+      tft.fillRoundRect(x, y, w, h, radius, fill);
+    }
+    for (int i = 0; i < lineWidth; ++i) {
+      tft.drawRoundRect(x + i, y + i, w - i * 2, h - i * 2, max(0, radius - i), outline);
+    }
   } else {
-    tft.fillRect(x, y, w, h, fill);
-    tft.drawRect(x, y, w, h, outline);
+    if (!transparentFill) {
+      tft.fillRect(x, y, w, h, fill);
+    }
+    for (int i = 0; i < lineWidth; ++i) {
+      tft.drawRect(x + i, y + i, w - i * 2, h - i * 2, outline);
+    }
   }
 
   Serial.printf("GUI box %d rendered\n", id);
@@ -602,7 +1125,7 @@ void drawFontTest()
 
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   tft.drawString("B18", 8, 286, 2);
-  tft.setFreeFont(&FreeSansBold18pt8b);
+  tft.setFreeFont(guiFontById(9)->font);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("AaBb 0123", 52, 280);
   tft.setTextFont(1);
@@ -610,18 +1133,35 @@ void drawFontTest()
 
 void drawTextWindow(int id, int x, int y, int w, int h, const char *title, const char *text, uint16_t fill, uint16_t outline)
 {
-  tft.fillRoundRect(x, y, w, h, 6, fill);
+  bool transparentFill = fill == 0x0001;
+  char mappedTitle[COMMAND_BUFFER_SIZE];
+  char mappedText[COMMAND_BUFFER_SIZE];
+  mapCp1251ToRusFont(title, mappedTitle, sizeof(mappedTitle));
+  mapCp1251ToRusFont(text, mappedText, sizeof(mappedText));
+  if (!transparentFill) {
+    tft.fillRoundRect(x, y, w, h, 6, fill);
+  }
   tft.drawRoundRect(x, y, w, h, 6, outline);
-  tft.fillRoundRect(x + 3, y + 3, w - 6, 26, 4, outline);
+  if (!transparentFill) {
+    tft.fillRoundRect(x + 3, y + 3, w - 6, 26, 4, outline);
+  }
 
   tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, outline);
-  tft.drawString(title, x + 10, y + 16, 2);
+  if (transparentFill) {
+    tft.setTextColor(TFT_WHITE);
+  } else {
+    tft.setTextColor(TFT_WHITE, outline);
+  }
+  tft.drawString(mappedTitle, x + 10, y + 16, 2);
 
-  tft.setTextColor(TFT_WHITE, fill);
+  if (transparentFill) {
+    tft.setTextColor(TFT_WHITE);
+  } else {
+    tft.setTextColor(TFT_WHITE, fill);
+  }
   tft.setTextDatum(TL_DATUM);
   tft.setTextWrap(true);
-  tft.drawString(text, x + 10, y + 42, 2);
+  tft.drawString(mappedText, x + 10, y + 42, 2);
 
   Serial.printf("GUI window %d rendered\n", id);
 }
@@ -652,6 +1192,98 @@ void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int val
   }
 
   Serial.printf("GUI scroll %d rendered\n", id);
+}
+
+void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb)
+{
+  maximum = max(maximum, 1);
+  value = constrain(value, 0, maximum);
+
+  h = max(h, 4);
+  w = max(w, h);
+  int trackHeight = max(2, h / 2);
+  int trackY = y + (h - trackHeight) / 2;
+  int radius = max(2, trackHeight / 2);
+  int knobRadius = h / 2;
+  int travel = max(1, w - h);
+  int knobX = x + knobRadius + (travel * value) / maximum;
+  int knobY = y + h / 2;
+  uint16_t filledTrack = lightenRgb565(thumb, 45);
+
+  tft.fillRoundRect(x, trackY, w, trackHeight, radius, track);
+  tft.fillRoundRect(x, trackY, max(trackHeight, knobX - x), trackHeight, radius, filledTrack);
+  tft.fillCircle(knobX, knobY, knobRadius, thumb);
+  tft.drawCircle(knobX, knobY, knobRadius, TFT_BLACK);
+
+  Serial.printf("GUI track %d rendered value=%d max=%d\n", id, value, maximum);
+}
+
+void drawProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t fill, uint16_t background, uint16_t outline)
+{
+  percent = constrain(percent, 0, 100);
+  w = max(w, 4);
+  h = max(h, 4);
+
+  int radius = min(5, h / 3);
+  int innerX = x + 2;
+  int innerY = y + 2;
+  int innerW = max(1, w - 4);
+  int innerH = max(1, h - 4);
+  int fillW = (innerW * percent) / 100;
+
+  tft.fillRoundRect(x, y, w, h, radius, background);
+  tft.fillRoundRect(innerX, innerY, innerW, innerH, max(1, radius - 1), background);
+  if (fillW > 0) {
+    if (fillW >= innerW) {
+      tft.fillRoundRect(innerX, innerY, innerW, innerH, max(1, radius - 1), fill);
+    } else {
+      tft.fillRect(innerX, innerY, fillW, innerH, fill);
+    }
+  }
+  tft.drawRoundRect(x, y, w, h, radius, outline);
+
+  Serial.printf("GUI progress %d rendered percent=%d\n", id, percent);
+}
+
+void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t knob, uint16_t outline, uint16_t onFill)
+{
+  state = state == 0 ? 0 : 1;
+  h = max(h, 8);
+  w = max(w, h * 2);
+
+  int radius = h / 2;
+  int border = max(2, h / 14);
+  int knobRadius = max(2, (h - border * 4) / 2);
+  int knobY = y + h / 2;
+  int knobX = state ? (x + w - radius) : (x + radius);
+
+  tft.fillRoundRect(x, y, w, h, radius, state ? onFill : TFT_BLACK);
+  tft.drawRoundRect(x, y, w, h, radius, outline);
+  for (int i = 1; i < border; i++) {
+    tft.drawRoundRect(x + i, y + i, w - i * 2, h - i * 2, max(1, radius - i), outline);
+  }
+  tft.fillCircle(knobX, knobY, knobRadius, knob);
+  tft.drawCircle(knobX, knobY, knobRadius, TFT_BLACK);
+
+  Serial.printf("GUI switch %d rendered state=%d\n", id, state);
+}
+
+void drawCircleComponent(int id, int x, int y, int d, uint16_t fill, uint16_t outline, int lineWidth)
+{
+  lineWidth = constrain(lineWidth, 1, 4);
+  d = max(d, 2);
+  int radius = d / 2;
+  int cx = x + radius;
+  int cy = y + radius;
+
+  if (fill != 0x0001) {
+    tft.fillCircle(cx, cy, radius, fill);
+  }
+  for (int i = 0; i < lineWidth; ++i) {
+    tft.drawCircle(cx, cy, max(1, radius - i), outline);
+  }
+
+  Serial.printf("GUI circle %d rendered\n", id);
 }
 
 const BitmapAsset *findBitmapAsset(const char *name)
@@ -694,28 +1326,96 @@ void drawMonoBitmapAsset(int id, int x, int y, const char *name, uint16_t foregr
   Serial.printf("GUI bitmap %d rendered asset=%s\n", id, asset->name);
 }
 
-void drawTextLabel(int id, int x, int y, const char *text, uint16_t color, uint16_t background, int font)
+char parseHorizontalAlign(const char *value, char fallback = 'C')
+{
+  if (value == nullptr || value[0] == '\0') {
+    return fallback;
+  }
+  char align = static_cast<char>(toupper(static_cast<unsigned char>(value[0])));
+  return (align == 'L' || align == 'C' || align == 'R') ? align : fallback;
+}
+
+char parseVerticalAlign(const char *value, char fallback = 'C')
+{
+  if (value == nullptr || value[0] == '\0') {
+    return fallback;
+  }
+  char align = static_cast<char>(toupper(static_cast<unsigned char>(value[0])));
+  return (align == 'T' || align == 'C' || align == 'B') ? align : fallback;
+}
+
+uint8_t textDatumForAlign(char hAlign, char vAlign)
+{
+  if (vAlign == 'T') {
+    if (hAlign == 'L') return TL_DATUM;
+    if (hAlign == 'R') return TR_DATUM;
+    return TC_DATUM;
+  }
+  if (vAlign == 'B') {
+    if (hAlign == 'L') return BL_DATUM;
+    if (hAlign == 'R') return BR_DATUM;
+    return BC_DATUM;
+  }
+  if (hAlign == 'L') return ML_DATUM;
+  if (hAlign == 'R') return MR_DATUM;
+  return MC_DATUM;
+}
+
+int alignedTextX(int x, int w, char hAlign)
+{
+  if (w <= 0) {
+    return x;
+  }
+  if (hAlign == 'L') return x + 4;
+  if (hAlign == 'R') return x + w - 4;
+  return x + w / 2;
+}
+
+int alignedTextY(int y, int h, char vAlign)
+{
+  if (h <= 0) {
+    return y;
+  }
+  if (vAlign == 'T') return y + 4;
+  if (vAlign == 'B') return y + h - 4;
+  return y + h / 2;
+}
+
+void drawAlignedTextBox(const char *text, int x, int y, int w, int h, uint16_t color,
+                        uint16_t background, int font, char hAlign, char vAlign,
+                        bool fillBackground)
 {
   int resolvedFont = resolveTextFont(text, font);
+  char mappedText[COMMAND_BUFFER_SIZE];
+  mapCp1251ToRusFont(text, mappedText, sizeof(mappedText));
+  int drawX = alignedTextX(x, w, hAlign);
+  int drawY = alignedTextY(y, h, vAlign);
 
-  if (resolvedFont == 4) {
-    x += LARGE_FONT_X_CORRECTION;
-    y += LARGE_FONT_Y_CORRECTION;
+  if (fillBackground && background != COLOR_TRANSPARENT && w > 0 && h > 0) {
+    tft.fillRect(x, y, w, h, background);
   }
 
-  tft.setTextDatum(TL_DATUM);
+  tft.setTextDatum((w > 0 && h > 0) ? textDatumForAlign(hAlign, vAlign) : TL_DATUM);
   if (background == COLOR_TRANSPARENT) {
     tft.setTextColor(color);
   } else {
     tft.setTextColor(color, background);
   }
-  if (resolvedFont == 9) {
-    tft.setFreeFont(&FreeSansBold18pt8b);
-    tft.drawString(text, x, y);
+  const GuiFontEntry *guiFont = guiFontById(resolvedFont);
+  if (guiFont != nullptr) {
+    tft.setFreeFont(guiFont->font);
+    tft.drawString(mappedText, drawX, drawY + GFX_FONT_Y_CORRECTION);
     tft.setTextFont(1);
   } else {
-    tft.drawString(text, x, y, resolvedFont);
+    tft.drawString(mappedText, drawX, drawY, resolvedFont);
   }
+}
+
+void drawTextLabel(int id, int x, int y, int w, int h, const char *text,
+                   uint16_t color, uint16_t background, int font, char hAlign, char vAlign)
+{
+  int resolvedFont = resolveTextFont(text, font);
+  drawAlignedTextBox(text, x, y, w, h, color, background, resolvedFont, hAlign, vAlign, true);
 
   Serial.printf("GUI text %d rendered font=%d\n", id, resolvedFont);
 }
@@ -846,7 +1546,7 @@ void drawStartupScreen()
   }
 }
 
-bool processCommand(char *line, Stream &reply)
+bool processCommand(char *line, Print &reply)
 {
   char original[COMMAND_BUFFER_SIZE];
   strlcpy(original, line, sizeof(original));
@@ -860,8 +1560,23 @@ bool processCommand(char *line, Stream &reply)
     *p = static_cast<char>(toupper(static_cast<unsigned char>(*p)));
   }
 
-  if (strcmp(command, "HELP") == 0 || strcmp(command, "?") == 0) {
+  if (strcmp(command, "?") == 0) {
+    sendReady(reply);
+    return true;
+  }
+
+  if (strcmp(command, "HELP") == 0) {
     printHelp(reply);
+    return true;
+  }
+
+  if (strcmp(command, "SHOWIP") == 0) {
+    reply.print("IP|");
+    reply.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "0.0.0.0");
+    reply.print("|PORT|");
+    reply.print(GUI_UDP_PORT);
+    reply.print("|HOST|");
+    reply.println(OTA_HOSTNAME);
     return true;
   }
 
@@ -885,17 +1600,54 @@ bool processCommand(char *line, Stream &reply)
     return ok;
   }
 
+  if (strcmp(command, "FS") == 0) {
+    char *path = strtok(nullptr, "|");
+    return printSdFileSize(path, reply);
+  }
+
   if (strcmp(command, "JPG") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
     char *path = strtok(nullptr, "|");
-    int scale = parseIntField(strtok(nullptr, "|"), 1);
-    bool ok = drawSdJpeg(id, x, y, path, scale, reply);
+    char *scaleText = strtok(nullptr, "|");
+    int srcX = parseIntField(strtok(nullptr, "|"), 0);
+    int srcY = parseIntField(strtok(nullptr, "|"), 0);
+    int srcW = parseIntField(strtok(nullptr, "|"), 0);
+    int srcH = parseIntField(strtok(nullptr, "|"), 0);
+    bool ok = drawSdJpeg(id, x, y, path, scaleText, srcX, srcY, srcW, srcH, reply);
     if (ok) {
       sendAck(reply, original, true);
     }
     return ok;
+  }
+
+  if (strcmp(command, "FW") == 0) {
+    char *path = strtok(nullptr, "|");
+    char *sizeText = strtok(nullptr, "|");
+    size_t expectedSize = sizeText ? static_cast<size_t>(strtoul(sizeText, nullptr, 10)) : 0;
+    return beginSdUpload(path, expectedSize, reply);
+  }
+
+  if (strcmp(command, "FD") == 0) {
+    char *hexData = strtok(nullptr, "|");
+    return writeSdUploadHex(hexData, reply);
+  }
+
+  if (strcmp(command, "FDO") == 0) {
+    char *offsetText = strtok(nullptr, "|");
+    char *hexData = strtok(nullptr, "|");
+    size_t expectedOffset = offsetText ? static_cast<size_t>(strtoul(offsetText, nullptr, 10)) : 0;
+    return writeSdUploadHexAt(expectedOffset, hexData, reply);
+  }
+
+  if (strcmp(command, "FE") == 0) {
+    return endSdUpload(reply);
+  }
+
+  if (strcmp(command, "SC") == 0) {
+    char *path = strtok(nullptr, "|");
+    return runSdScript(path, reply);
   }
 
   if (strcmp(command, "C") == 0 || strcmp(command, "CL") == 0) {
@@ -922,7 +1674,7 @@ bool processCommand(char *line, Stream &reply)
     return true;
   }
 
-  if (strcmp(command, "BX") == 0) {
+  if (strcmp(command, "BX") == 0 || strcmp(command, "RR") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
@@ -931,7 +1683,8 @@ bool processCommand(char *line, Stream &reply)
     uint16_t fill = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     uint16_t outline = parseColor(strtok(nullptr, "|"), fill);
     int radius = parseIntField(strtok(nullptr, "|"), 0);
-    drawBox(id, x, y, w, h, fill, outline, radius);
+    int lineWidth = parseIntField(strtok(nullptr, "|"), 1);
+    drawBox(id, x, y, w, h, fill, outline, radius, lineWidth);
     sendAck(reply, original, true);
     return true;
   }
@@ -946,7 +1699,12 @@ bool processCommand(char *line, Stream &reply)
     uint16_t fill = parseColor(strtok(nullptr, "|"), TFT_BLUE);
     uint16_t outline = parseColor(strtok(nullptr, "|"), TFT_WHITE);
     uint16_t text = parseColor(strtok(nullptr, "|"), TFT_WHITE);
-    drawButton(id, x, y, w, h, label ? label : "", fill, outline, text);
+    int lineWidth = parseIntField(strtok(nullptr, "|"), 1);
+    int font = parseIntField(strtok(nullptr, "|"), 2);
+    char hAlign = parseHorizontalAlign(strtok(nullptr, "|"), 'C');
+    char vAlign = parseVerticalAlign(strtok(nullptr, "|"), 'C');
+    drawButton(id, x, y, w, h, label ? label : "", fill, outline, text,
+               lineWidth, font, hAlign, vAlign);
     sendAck(reply, original, true);
     return true;
   }
@@ -986,6 +1744,64 @@ bool processCommand(char *line, Stream &reply)
     return true;
   }
 
+  if (strcmp(command, "TR") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    int w = parseIntField(strtok(nullptr, "|"));
+    int h = parseIntField(strtok(nullptr, "|"));
+    int value = parseIntField(strtok(nullptr, "|"));
+    int maximum = parseIntField(strtok(nullptr, "|"), 100);
+    uint16_t track = parseColor(strtok(nullptr, "|"), TFT_DARKGREY);
+    uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
+    drawTrackBar(id, x, y, w, h, value, maximum, track, thumb);
+    sendAck(reply, original, true);
+    return true;
+  }
+
+  if (strcmp(command, "PB") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    int w = parseIntField(strtok(nullptr, "|"));
+    int h = parseIntField(strtok(nullptr, "|"));
+    int percent = parseIntField(strtok(nullptr, "|"));
+    uint16_t fill = parseColor(strtok(nullptr, "|"), TFT_GREEN);
+    uint16_t background = parseColor(strtok(nullptr, "|"), TFT_WHITE);
+    uint16_t outline = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
+    drawProgressBar(id, x, y, w, h, percent, fill, background, outline);
+    sendAck(reply, original, true);
+    return true;
+  }
+
+  if (strcmp(command, "CC") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    int d = parseIntField(strtok(nullptr, "|"), 24);
+    uint16_t fill = parseColor(strtok(nullptr, "|"), TFT_WHITE);
+    uint16_t outline = parseColor(strtok(nullptr, "|"), fill);
+    int lineWidth = parseIntField(strtok(nullptr, "|"), 1);
+    drawCircleComponent(id, x, y, d, fill, outline, lineWidth);
+    sendAck(reply, original, true);
+    return true;
+  }
+
+  if (strcmp(command, "SW") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    int w = parseIntField(strtok(nullptr, "|"));
+    int h = parseIntField(strtok(nullptr, "|"));
+    int state = parseIntField(strtok(nullptr, "|"));
+    uint16_t knob = parseColor(strtok(nullptr, "|"), TFT_GREEN);
+    uint16_t outline = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
+    uint16_t onFill = parseColor(strtok(nullptr, "|"), 0x8E66);
+    drawSwitch(id, x, y, w, h, state, knob, outline, onFill);
+    sendAck(reply, original, true);
+    return true;
+  }
+
   if (strcmp(command, "T") == 0 || strcmp(command, "TX") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
@@ -994,7 +1810,11 @@ bool processCommand(char *line, Stream &reply)
     uint16_t color = parseColor(strtok(nullptr, "|"), TFT_WHITE);
     uint16_t background = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     int font = parseIntField(strtok(nullptr, "|"), 2);
-    drawTextLabel(id, x, y, text ? text : "", color, background, font);
+    int w = parseIntField(strtok(nullptr, "|"), 0);
+    int h = parseIntField(strtok(nullptr, "|"), 0);
+    char hAlign = parseHorizontalAlign(strtok(nullptr, "|"), w > 0 ? 'C' : 'L');
+    char vAlign = parseVerticalAlign(strtok(nullptr, "|"), h > 0 ? 'C' : 'T');
+    drawTextLabel(id, x, y, w, h, text ? text : "", color, background, font, hAlign, vAlign);
     sendAck(reply, original, true);
     return true;
   }
@@ -1043,6 +1863,41 @@ void readCommandStream(Stream &stream, char *buffer, size_t &length)
   }
 }
 
+void readUdpCommands()
+{
+  if (!udpReady) {
+    return;
+  }
+
+  int packetSize = GuiUdp.parsePacket();
+  if (packetSize <= 0) {
+    return;
+  }
+
+  int readCount = GuiUdp.read(udpCommand, sizeof(udpCommand) - 1);
+  if (readCount <= 0) {
+    return;
+  }
+  udpCommand[readCount] = '\0';
+
+  char *line = udpCommand;
+  while (*line != '\0' && isspace(static_cast<unsigned char>(*line))) {
+    ++line;
+  }
+  char *end = line + strlen(line);
+  while (end > line && isspace(static_cast<unsigned char>(*(end - 1)))) {
+    --end;
+  }
+  *end = '\0';
+  if (*line == '\0') {
+    return;
+  }
+
+  GuiUdp.beginPacket(GuiUdp.remoteIP(), GuiUdp.remotePort());
+  processCommand(line, GuiUdp);
+  GuiUdp.endPacket();
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -1082,7 +1937,9 @@ void setup()
   setBacklight(true);
   startOta();
 
-  Serial.println("Commands: HELP, SD, LS|path, JPG|id|x|y|path|scale, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text, TX|id|x|y|text|color|bg|font, TW|id|x|y|w|h|title|text|fill|outline, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
+  Serial.println("Commands: HELP, SD, LS|path, JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH, FW|path|size, FD|hex, FE, SC|path, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V, TX|id|x|y|text|color|bg|font|w|h|H|V, TW|id|x|y|w|h|title|text|fill|outline, RR|id|x|y|w|h|fill|outline|radius|line, TR|id|x|y|w|h|value|max|track|thumb, PB|id|x|y|w|h|percent|fill|background|outline, CC|id|x|y|diameter|fill|outline|line, SW|id|x|y|w|h|0/1|knob|outline|onfill, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
+  sendReady(Serial);
+  sendReady(UiSerial);
 }
 
 void loop()
@@ -1099,4 +1956,5 @@ void loop()
   updateTouchButtons();
   readCommandStream(Serial, usbCommand, usbCommandLength);
   readCommandStream(UiSerial, uartCommand, uartCommandLength);
+  readUdpCommands();
 }
