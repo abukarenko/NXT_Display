@@ -158,9 +158,9 @@ C:\Users\basachka\.platformio\penv\Scripts\pio.exe run -t upload
 ```
 # OTA updates
 
-1. Copy `include/ota_secrets.example.h` to `include/ota_secrets.h` and enter the Wi-Fi credentials and an OTA password. The local secrets file is ignored by Git.
+1. Copy `include/ota_secrets.example.h` to `include/ota_secrets.h`, enter up to three Wi-Fi profiles (`WIFI_SSID_1` through `WIFI_SSID_3`) and an OTA password. Empty profiles are skipped. The local secrets file is ignored by Git.
 2. Upload the firmware once over USB with the `esp32dev` environment.
-3. Confirm in the serial monitor that `OTA ready: nxt-display.local` is printed.
+3. At startup the display shows each Wi-Fi connection attempt for up to 5 seconds. After a successful connection it shows the selected SSID and IP address. Confirm in the serial monitor that `OTA ready: nxt-display.local` is printed.
 4. Upload subsequent builds with the `esp32dev_ota` environment.
 
 If `OTA_PASSWORD` is not empty, the OTA upload script reads it from the ignored `include/ota_secrets.h` file automatically.

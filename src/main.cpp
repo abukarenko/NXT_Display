@@ -16,6 +16,34 @@
 #define OTA_PASSWORD ""
 #endif
 
+#ifndef WIFI_SSID
+#define WIFI_SSID ""
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD ""
+#endif
+#ifndef WIFI_SSID_1
+#define WIFI_SSID_1 WIFI_SSID
+#endif
+#ifndef WIFI_PASSWORD_1
+#define WIFI_PASSWORD_1 WIFI_PASSWORD
+#endif
+#ifndef WIFI_SSID_2
+#define WIFI_SSID_2 ""
+#endif
+#ifndef WIFI_PASSWORD_2
+#define WIFI_PASSWORD_2 ""
+#endif
+#ifndef WIFI_SSID_3
+#define WIFI_SSID_3 ""
+#endif
+#ifndef WIFI_PASSWORD_3
+#define WIFI_PASSWORD_3 ""
+#endif
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD ""
+#endif
+
 TFT_eSPI tft;
 
 constexpr uint8_t BACKLIGHT_PIN = TFT_BL;
@@ -37,12 +65,23 @@ constexpr int16_t TOUCH_CENTER_X_CORRECTION_RANGE = 140;
 constexpr uint16_t COLOR_TRANSPARENT = 0x0001;
 constexpr int16_t GFX_FONT_Y_CORRECTION = -3;
 constexpr char OTA_HOSTNAME[] = "nxt-display";
-constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 5000;
 constexpr uint32_t TOUCH_POLL_INTERVAL_MS = 25;
 constexpr size_t MAX_UI_BUTTONS = 16;
 constexpr size_t MAX_UI_TOUCH_CONTROLS = 16;
 constexpr size_t MAX_SCENE_LINES = 96;
 constexpr size_t BUTTON_LABEL_SIZE = 24;
+
+struct WiFiProfile {
+  const char *ssid;
+  const char *password;
+};
+
+const WiFiProfile WIFI_PROFILES[] = {
+  {WIFI_SSID_1, WIFI_PASSWORD_1},
+  {WIFI_SSID_2, WIFI_PASSWORD_2},
+  {WIFI_SSID_3, WIFI_PASSWORD_3}
+};
 
 struct UiButton {
   int id;
@@ -204,6 +243,7 @@ void drawAlignedTextBox(const char *text, int x, int y, int w, int h, uint16_t c
                         uint16_t background, int font, char hAlign, char vAlign,
                         bool fillBackground);
 bool processCommand(char *line, Print &reply);
+void drawStartupScreen();
 
 void resetSceneLines()
 {
@@ -1162,28 +1202,129 @@ void drawOtaProgress(unsigned int percent, const char *status, uint16_t statusCo
   }
 }
 
-void startOta()
+void drawWiFiConnecting(const char *ssid, size_t profileNumber)
 {
-  if (WIFI_SSID[0] == '\0') {
-    Serial.println("OTA disabled: configure include/ota_secrets.h");
-    return;
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("WI-FI CONNECTION", tft.width() / 2, 54, 4);
+
+  char profileText[32];
+  snprintf(profileText, sizeof(profileText), "Profile %u of 3", static_cast<unsigned>(profileNumber));
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString(profileText, tft.width() / 2, 105, 2);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(ssid, tft.width() / 2, 140, 2);
+  tft.drawRoundRect(40, 180, 400, 24, 5, TFT_WHITE);
+  tft.fillRoundRect(44, 184, 392, 16, 3, TFT_DARKGREY);
+
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("Connecting...", tft.width() / 2, 240, 2);
+}
+
+void updateWiFiProgress(uint32_t elapsedMs)
+{
+  int16_t width = static_cast<int16_t>((392ULL * min(elapsedMs, WIFI_CONNECT_TIMEOUT_MS)) /
+                                       WIFI_CONNECT_TIMEOUT_MS);
+  if (width > 0) {
+    tft.fillRect(44, 184, width, 16, TFT_SKYBLUE);
+  }
+}
+
+void drawWiFiResult(bool connected, const char *ssid)
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(connected ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  tft.drawString(connected ? "WI-FI CONNECTED" : "WI-FI NOT FOUND", tft.width() / 2, 65, 4);
+
+  if (connected) {
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString("SSID", tft.width() / 2, 125, 2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(ssid, tft.width() / 2, 153, 2);
+
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString("IP ADDRESS", tft.width() / 2, 205, 2);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString(WiFi.localIP().toString(), tft.width() / 2, 238, 4);
+  } else {
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString("Check the configured profiles", tft.width() / 2, 145, 2);
+  }
+}
+
+bool connectWiFiProfiles()
+{
+  size_t configuredProfiles = 0;
+  for (const WiFiProfile &profile : WIFI_PROFILES) {
+    if (profile.ssid[0] != '\0') {
+      ++configuredProfiles;
+    }
+  }
+
+  if (configuredProfiles == 0) {
+    Serial.println("Wi-Fi disabled: configure include/ota_secrets.h");
+    return false;
   }
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setHostname(OTA_HOSTNAME);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  Serial.printf("Connecting to Wi-Fi for OTA: %s", WIFI_SSID);
-  uint32_t startedAt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
-    delay(250);
-    Serial.print('.');
+  size_t profileNumber = 0;
+  for (const WiFiProfile &profile : WIFI_PROFILES) {
+    if (profile.ssid[0] == '\0') {
+      continue;
+    }
+    ++profileNumber;
+
+    WiFi.disconnect();
+    delay(100);
+    drawWiFiConnecting(profile.ssid, profileNumber);
+    Serial.printf("Connecting to Wi-Fi profile %u: %s", static_cast<unsigned>(profileNumber), profile.ssid);
+    WiFi.begin(profile.ssid, profile.password);
+
+    uint32_t startedAt = millis();
+    uint32_t lastDisplayUpdate = 0;
+    uint32_t lastSerialUpdate = 0;
+    while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
+      uint32_t elapsed = millis() - startedAt;
+      if (elapsed - lastDisplayUpdate >= 100) {
+        updateWiFiProgress(elapsed);
+        lastDisplayUpdate = elapsed;
+      }
+      delay(50);
+      if (elapsed - lastSerialUpdate >= 250) {
+        Serial.print('.');
+        lastSerialUpdate = elapsed;
+      }
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      updateWiFiProgress(WIFI_CONNECT_TIMEOUT_MS);
+      drawWiFiResult(true, profile.ssid);
+      Serial.printf("Wi-Fi connected: SSID=%s IP=%s\n", profile.ssid, WiFi.localIP().toString().c_str());
+      delay(3000);
+      return true;
+    }
+
+    Serial.printf("Wi-Fi profile timed out after %lu ms: %s\n",
+                  static_cast<unsigned long>(WIFI_CONNECT_TIMEOUT_MS), profile.ssid);
   }
-  Serial.println();
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("OTA unavailable: Wi-Fi connection timed out");
+  drawWiFiResult(false, "");
+  Serial.println("Wi-Fi unavailable: all configured profiles failed");
+  delay(2000);
+  return false;
+}
+
+void startOta()
+{
+  if (!connectWiFiProfiles()) {
+    drawStartupScreen();
     return;
   }
 
@@ -1219,8 +1360,10 @@ void startOta()
   ArduinoOTA.begin();
   otaReady = true;
   udpReady = GuiUdp.begin(GUI_UDP_PORT) == 1;
-  Serial.printf("OTA ready: %s.local, IP=%s\n", OTA_HOSTNAME, WiFi.localIP().toString().c_str());
+  Serial.printf("OTA ready: %s.local, SSID=%s, IP=%s\n", OTA_HOSTNAME,
+                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
   Serial.printf("GUI UDP %s: port %u\n", udpReady ? "ready" : "error", GUI_UDP_PORT);
+  drawStartupScreen();
 }
 
 void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t fill,
@@ -1525,7 +1668,8 @@ void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t track, u
   int border = max(2, h / 14);
   int knobRadius = max(2, (h - border * 4) / 2);
   int knobY = y + h / 2;
-  int knobX = state ? (x + w - radius) : (x + radius);
+  int enabledKnobInset = max(5, border * 2);
+  int knobX = state ? (x + w - radius - enabledKnobInset) : (x + radius);
   uint16_t filledTrack = lightenRgb565(thumb, 45);
 
   if (!registerTouchControl(UI_TOUCH_SWITCH, id, x, y, w, h, state, 1, track, thumb)) {
@@ -1533,7 +1677,7 @@ void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t track, u
   }
   tft.fillRoundRect(x, y, w, h, radius, track);
   if (state) {
-    tft.fillRoundRect(x, y, max(h, knobX - x + knobRadius), h, radius, filledTrack);
+    tft.fillRoundRect(x, y, w, h, radius, filledTrack);
   }
   tft.drawRoundRect(x, y, w, h, radius, track);
   for (int i = 1; i < border; i++) {
@@ -2000,6 +2144,8 @@ bool processCommand(char *line, Print &reply)
   if (strcmp(command, "SHOWIP") == 0) {
     reply.print("IP|");
     reply.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "0.0.0.0");
+    reply.print("|SSID|");
+    reply.print(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "");
     reply.print("|PORT|");
     reply.print(GUI_UDP_PORT);
     reply.print("|HOST|");
