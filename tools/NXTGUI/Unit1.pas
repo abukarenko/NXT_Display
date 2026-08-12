@@ -1325,8 +1325,41 @@ end;
 //======================================================
 // Возвращает локальную папку, соответствующую содержимому SD-карты.
 function TForm1.SdRootPath: string;
+var
+  ExeSd: string;
+  IniSd: string;
+  DevSd: string;
+  Ini: TIniFile;
 begin
-  Result := ExpandFileName(ExtractFilePath(ParamStr(0)) + '..\..\sd\');
+  ExeSd := ExpandFileName(ExtractFilePath(ParamStr(0)) + 'sd\');
+  if DirectoryExists(ExeSd) then
+  begin
+    Result := IncludeTrailingPathDelimiter(ExeSd);
+    Exit;
+  end;
+
+  IniSd := '';
+  if FileExists(ConfigFilePath) then
+  begin
+    Ini := TIniFile.Create(ConfigFilePath);
+    try
+      IniSd := Trim(Ini.ReadString('Paths', 'SdRoot', ''));
+    finally
+      Ini.Free;
+    end;
+  end;
+  if IniSd <> '' then
+  begin
+    IniSd := ExpandFileName(IniSd);
+    if DirectoryExists(IniSd) then
+    begin
+      Result := IncludeTrailingPathDelimiter(IniSd);
+      Exit;
+    end;
+  end;
+
+  DevSd := ExpandFileName(ExtractFilePath(ParamStr(0)) + '..\..\sd\');
+  Result := IncludeTrailingPathDelimiter(DevSd);
 end;
 
 //======================================================
@@ -2780,6 +2813,10 @@ begin
     Ini.WriteString('Colors', 'Text', FDefaultFgRgb);
     Ini.WriteString('Colors', 'Fill', FDefaultBgRgb);
     Ini.WriteString('Colors', 'Screen', FDefaultLcdBgRgb);
+    Ini.WriteString('Paths', 'SdRoot', Ini.ReadString('Paths', 'SdRoot', ''));
+    Ini.WriteString('Paths', 'FontsRoot', Ini.ReadString('Paths', 'FontsRoot', ''));
+    Ini.WriteString('WiFi', 'SSID', Ini.ReadString('WiFi', 'SSID', ''));
+    Ini.WriteString('WiFi', 'Password', Ini.ReadString('WiFi', 'Password', ''));
   finally
     Ini.Free;
   end;
