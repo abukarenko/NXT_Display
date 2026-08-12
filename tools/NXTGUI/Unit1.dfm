@@ -178,13 +178,6 @@ object Form1: TForm1
     Height = 13
     Caption = 'Position'
   end
-  object Label17: TLabel
-    Left = 864
-    Top = 312
-    Width = 59
-    Height = 13
-    Caption = 'Transparent'
-  end
   object Shape3: TShape
     Left = 632
     Top = 80
@@ -648,7 +641,7 @@ object Form1: TForm1
   end
   object Label24: TLabel
     Left = 736
-    Top = 480
+    Top = 504
     Width = 41
     Height = 13
     Caption = 'ESP font'
@@ -704,6 +697,8 @@ object Form1: TForm1
     Top = 192
     Width = 73
     Height = 41
+    Brush.Color = clAqua
+    Brush.Style = bsBDiagonal
   end
   object Label25: TLabel
     Left = 928
@@ -725,6 +720,34 @@ object Form1: TForm1
     Width = 65
     Height = 33
     Shape = stRoundRect
+  end
+  object Label28: TLabel
+    Left = 840
+    Top = 392
+    Width = 65
+    Height = 13
+    Caption = 'TEXT ALLIGN '
+  end
+  object Label27: TLabel
+    Left = 736
+    Top = 368
+    Width = 48
+    Height = 13
+    Caption = 'Horizontal'
+  end
+  object Label29: TLabel
+    Left = 912
+    Top = 368
+    Width = 35
+    Height = 13
+    Caption = 'Vertical'
+  end
+  object Label17: TLabel
+    Left = 736
+    Top = 424
+    Width = 22
+    Height = 13
+    Caption = 'Text'
   end
   object StatusBar1: TStatusBar
     Left = 0
@@ -789,7 +812,7 @@ object Form1: TForm1
     RowCount = 4
     FixedRows = 0
     ScrollBars = ssNone
-    TabOrder = 43
+    TabOrder = 12
   end
   object SpinEdit1: TSpinEdit
     Left = 736
@@ -870,16 +893,6 @@ object Form1: TForm1
     TabOrder = 11
     Value = 0
   end
-  object SpinEdit7: TSpinEdit
-    Left = 864
-    Top = 328
-    Width = 49
-    Height = 22
-    MaxValue = 0
-    MinValue = 0
-    TabOrder = 12
-    Value = 0
-  end
   object StringGrid1: TStringGrid
     Left = 16
     Top = 344
@@ -905,7 +918,7 @@ object Form1: TForm1
     Width = 65
     Height = 25
     Caption = 'Paste'
-    TabOrder = 41
+    TabOrder = 25
   end
   object Edit1: TEdit
     Left = 16
@@ -967,26 +980,17 @@ object Form1: TForm1
     Left = 920
     Top = 324
     Width = 97
-    Height = 34
+    Height = 29
     Max = 4
     Min = 1
     Position = 1
     TabOrder = 22
   end
-  object TrackBar2: TTrackBar
-    Left = 536
-    Top = 456
-    Width = 185
-    Height = 34
-    Max = 80
-    Frequency = 5
-    TabOrder = 42
-  end
   object ListBox1: TListBox
     Left = 736
-    Top = 496
+    Top = 520
     Width = 297
-    Height = 97
+    Height = 161
     ItemHeight = 13
     TabOrder = 23
   end
@@ -1000,77 +1004,13 @@ object Form1: TForm1
     OnMouseDown = Button8MouseDown
   end
   object Button9: TButton
-    Left = 736
-    Top = 600
+    Left = 640
+    Top = 656
     Width = 89
     Height = 25
     Caption = 'Font preview'
-    TabOrder = 33
-    OnClick = Button9Click
-  end
-  object RadioGroup1: TRadioGroup
-    Left = 736
-    Top = 400
-    Width = 129
-    Height = 73
-    Caption = 'TEXT ALLIGN VERTICAL'
-    TabOrder = 25
-  end
-  object RadioButton1: TRadioButton
-    Left = 744
-    Top = 416
-    Width = 57
-    Height = 17
-    Caption = 'Top'
-    TabOrder = 26
-  end
-  object RadioButton2: TRadioButton
-    Left = 744
-    Top = 448
-    Width = 57
-    Height = 17
-    Caption = 'Bottom'
-    TabOrder = 27
-  end
-  object RadioButton3: TRadioButton
-    Left = 744
-    Top = 432
-    Width = 57
-    Height = 17
-    Caption = 'Center'
-    TabOrder = 28
-  end
-  object RadioGroup2: TRadioGroup
-    Left = 872
-    Top = 400
-    Width = 145
-    Height = 73
-    Caption = 'TEXT ALLIGN HORIZONTAL'
-    TabOrder = 29
-  end
-  object RadioButton4: TRadioButton
-    Left = 888
-    Top = 416
-    Width = 57
-    Height = 17
-    Caption = 'Left'
     TabOrder = 30
-  end
-  object RadioButton5: TRadioButton
-    Left = 888
-    Top = 448
-    Width = 57
-    Height = 17
-    Caption = 'Right'
-    TabOrder = 31
-  end
-  object RadioButton6: TRadioButton
-    Left = 888
-    Top = 432
-    Width = 57
-    Height = 17
-    Caption = 'Center'
-    TabOrder = 32
+    OnClick = Button9Click
   end
   object Button10: TButton
     Left = 232
@@ -1078,7 +1018,7 @@ object Form1: TForm1
     Width = 65
     Height = 25
     Caption = 'Save'
-    TabOrder = 34
+    TabOrder = 32
   end
   object Button11: TButton
     Left = 304
@@ -1086,7 +1026,7 @@ object Form1: TForm1
     Width = 65
     Height = 25
     Caption = 'Load'
-    TabOrder = 35
+    TabOrder = 34
   end
   object CheckBox2: TCheckBox
     Left = 160
@@ -1104,14 +1044,14 @@ object Form1: TForm1
     Width = 52
     Height = 17
     Caption = 'UDP'
-    TabOrder = 37
+    TabOrder = 26
   end
   object Edit2: TEdit
     Left = 16
     Top = 660
     Width = 88
     Height = 21
-    TabOrder = 38
+    TabOrder = 27
     Text = '192.168.1.100'
   end
   object Edit3: TEdit
@@ -1119,7 +1059,7 @@ object Form1: TForm1
     Top = 660
     Width = 44
     Height = 21
-    TabOrder = 39
+    TabOrder = 28
     Text = '4210'
   end
   object Button12: TButton
@@ -1128,14 +1068,48 @@ object Form1: TForm1
     Width = 49
     Height = 25
     Caption = 'showip'
-    TabOrder = 40
+    TabOrder = 29
   end
   object CheckBox4: TCheckBox
     Left = 552
     Top = 336
-    Width = 97
+    Width = 137
     Height = 17
     Caption = 'Rewrite Image'
-    TabOrder = 44
+    TabOrder = 31
+  end
+  object ComboBox2: TComboBox
+    Left = 736
+    Top = 384
+    Width = 89
+    Height = 21
+    ItemHeight = 13
+    TabOrder = 33
+    Text = 'Left'
+    Items.Strings = (
+      'Left'
+      'Center'
+      'Right')
+  end
+  object ComboBox3: TComboBox
+    Left = 920
+    Top = 384
+    Width = 89
+    Height = 21
+    ItemHeight = 13
+    TabOrder = 35
+    Text = 'Center'
+    Items.Strings = (
+      'Top'
+      'Center'
+      'Bottom')
+  end
+  object Edit4: TEdit
+    Left = 736
+    Top = 440
+    Width = 273
+    Height = 21
+    TabOrder = 37
+    Text = 'Edit4'
   end
 end

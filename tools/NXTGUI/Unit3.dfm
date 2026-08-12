@@ -54,15 +54,15 @@ object Form3: TForm3
     Caption = 'Height'
   end
   object Label5: TLabel
-    Left = 504
-    Top = 248
+    Left = 16
+    Top = 392
     Width = 25
     Height = 13
     Caption = 'Scale'
   end
   object Label6: TLabel
-    Left = 568
-    Top = 248
+    Left = 64
+    Top = 392
     Width = 29
     Height = 13
     Alignment = taRightJustify
@@ -157,11 +157,11 @@ object Form3: TForm3
     OnClick = Button3Click
   end
   object TrackBar1: TTrackBar
-    Left = 496
-    Top = 264
-    Width = 120
+    Left = 8
+    Top = 344
+    Width = 481
     Height = 41
-    Max = 400
+    Max = 200
     Min = 10
     Frequency = 25
     Position = 100

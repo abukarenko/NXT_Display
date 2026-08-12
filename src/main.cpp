@@ -40,6 +40,8 @@ constexpr char OTA_HOSTNAME[] = "nxt-display";
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t TOUCH_POLL_INTERVAL_MS = 25;
 constexpr size_t MAX_UI_BUTTONS = 16;
+constexpr size_t MAX_UI_TOUCH_CONTROLS = 16;
+constexpr size_t MAX_SCENE_LINES = 96;
 constexpr size_t BUTTON_LABEL_SIZE = 24;
 
 struct UiButton {
@@ -54,6 +56,32 @@ struct UiButton {
   char label[BUTTON_LABEL_SIZE];
 };
 
+enum UiTouchKind {
+  UI_TOUCH_TRACK,
+  UI_TOUCH_SWITCH
+};
+
+struct UiTouchControl {
+  UiTouchKind kind;
+  int id;
+  int16_t x;
+  int16_t y;
+  int16_t w;
+  int16_t h;
+  int value;
+  int maximum;
+  uint16_t track;
+  uint16_t thumb;
+  uint16_t *background;
+  size_t backgroundPixels;
+};
+
+struct SceneLine {
+  char command[4];
+  int id;
+  char line[COMMAND_BUFFER_SIZE];
+};
+
 HardwareSerial UiSerial(2);
 WiFiUDP GuiUdp;
 char usbCommand[COMMAND_BUFFER_SIZE];
@@ -65,6 +93,12 @@ bool otaReady = false;
 bool otaInProgress = false;
 bool sdReady = false;
 bool udpReady = false;
+bool udpEventPeerReady = false;
+bool resetRequested = false;
+uint32_t resetAtMs = 0;
+IPAddress udpEventPeerIp;
+uint16_t udpEventPeerPort = 0;
+uint16_t currentScreenColor = TFT_BLACK;
 File sdUploadFile;
 String sdUploadPath;
 size_t sdUploadExpectedSize = 0;
@@ -80,8 +114,14 @@ int16_t jpegOutputZoom = 1;
 int otaDisplayedPercent = -1;
 UiButton uiButtons[MAX_UI_BUTTONS];
 size_t uiButtonCount = 0;
+UiTouchControl uiTouchControls[MAX_UI_TOUCH_CONTROLS];
+size_t uiTouchControlCount = 0;
+SceneLine sceneLines[MAX_SCENE_LINES];
+size_t sceneLineCount = 0;
 int pressedButtonIndex = -1;
 int currentTouchButtonIndex = -1;
+int pressedTouchControlIndex = -1;
+int currentTouchControlIndex = -1;
 uint16_t lastTouchX = 0;
 uint16_t lastTouchY = 0;
 
@@ -158,11 +198,168 @@ const BitmapAsset BITMAP_ASSETS[] = {
 void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb);
 void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb);
 void drawProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t fill, uint16_t background, uint16_t outline);
-void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t knob, uint16_t outline, uint16_t onFill);
+void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t track, uint16_t thumb);
+void drawTrackBarDirty(UiTouchControl &control, int oldValue, int newValue);
 void drawAlignedTextBox(const char *text, int x, int y, int w, int h, uint16_t color,
                         uint16_t background, int font, char hAlign, char vAlign,
                         bool fillBackground);
 bool processCommand(char *line, Print &reply);
+
+void resetSceneLines()
+{
+  sceneLineCount = 0;
+}
+
+int findSceneLine(const char *command, int id)
+{
+  for (size_t i = 0; i < sceneLineCount; ++i) {
+    if (sceneLines[i].id == id && strcmp(sceneLines[i].command, command) == 0) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+void storeSceneLine(const char *command, int id, const char *line)
+{
+  int index = findSceneLine(command, id);
+  if (index < 0) {
+    if (sceneLineCount >= MAX_SCENE_LINES) {
+      Serial.printf("Scene registry full; %s|%d not stored\n", command, id);
+      return;
+    }
+    index = static_cast<int>(sceneLineCount++);
+  }
+
+  strlcpy(sceneLines[index].command, command, sizeof(sceneLines[index].command));
+  sceneLines[index].id = id;
+  strlcpy(sceneLines[index].line, line ? line : "", sizeof(sceneLines[index].line));
+}
+
+bool replacePipeField(char *line, int fieldIndex, const char *value)
+{
+  char updated[COMMAND_BUFFER_SIZE];
+  size_t out = 0;
+  int currentField = 0;
+  const char *p = line;
+
+  updated[0] = '\0';
+  while (*p != '\0' && out < sizeof(updated) - 1) {
+    if (currentField == fieldIndex) {
+      const char *v = value ? value : "";
+      while (*v != '\0' && out < sizeof(updated) - 1) {
+        updated[out++] = *v++;
+      }
+      while (*p != '\0' && *p != '|') {
+        ++p;
+      }
+      if (*p == '|') {
+        updated[out++] = *p++;
+        ++currentField;
+      }
+      continue;
+    }
+
+    if (*p == '|') {
+      ++currentField;
+    }
+    updated[out++] = *p++;
+  }
+  updated[out] = '\0';
+
+  if (currentField < fieldIndex) {
+    return false;
+  }
+
+  strlcpy(line, updated, COMMAND_BUFFER_SIZE);
+  return true;
+}
+
+void updateSceneControlValue(const char *command, int id, int value)
+{
+  int index = findSceneLine(command, id);
+  char valueText[16];
+  if (index < 0) {
+    return;
+  }
+
+  snprintf(valueText, sizeof(valueText), "%d", value);
+  replacePipeField(sceneLines[index].line, 6, valueText);
+}
+
+void printSceneSnapshot(Print &stream)
+{
+  stream.print("OK|SS|BEGIN|");
+  stream.println(sceneLineCount);
+  for (size_t i = 0; i < sceneLineCount; ++i) {
+    stream.println(sceneLines[i].line);
+  }
+  stream.println("OK|SS|END");
+}
+
+void resetTouchRegistry()
+{
+  for (size_t i = 0; i < uiTouchControlCount; ++i) {
+    free(uiTouchControls[i].background);
+    uiTouchControls[i].background = nullptr;
+    uiTouchControls[i].backgroundPixels = 0;
+  }
+  uiButtonCount = 0;
+  uiTouchControlCount = 0;
+  pressedButtonIndex = -1;
+  currentTouchButtonIndex = -1;
+  pressedTouchControlIndex = -1;
+  currentTouchControlIndex = -1;
+}
+
+void resetScene()
+{
+  resetTouchRegistry();
+  resetSceneLines();
+}
+
+bool registerTouchControl(UiTouchKind kind, int id, int x, int y, int w, int h,
+                          int value, int maximum, uint16_t track, uint16_t thumb)
+{
+  size_t controlIndex = uiTouchControlCount;
+  for (size_t i = 0; i < uiTouchControlCount; ++i) {
+    if (uiTouchControls[i].kind == kind && uiTouchControls[i].id == id) {
+      controlIndex = i;
+      break;
+    }
+  }
+
+  if (controlIndex == uiTouchControlCount) {
+    if (uiTouchControlCount >= MAX_UI_TOUCH_CONTROLS) {
+      Serial.printf("Touch registry full; id=%d is display-only\n", id);
+      return false;
+    }
+    uiTouchControls[controlIndex].background = nullptr;
+    uiTouchControls[controlIndex].backgroundPixels = 0;
+    ++uiTouchControlCount;
+  }
+
+  UiTouchControl &control = uiTouchControls[controlIndex];
+  if ((control.background != nullptr) &&
+      (control.x != x || control.y != y || control.w != w || control.h != h ||
+       control.kind != kind || control.id != id)) {
+    free(control.background);
+    control.background = nullptr;
+    control.backgroundPixels = 0;
+  }
+
+  control.kind = kind;
+  control.id = id;
+  control.x = x;
+  control.y = y;
+  control.w = w;
+  control.h = h;
+  control.value = value;
+  control.maximum = max(maximum, 1);
+  control.track = track;
+  control.thumb = thumb;
+  return true;
+}
 
 const char *STARTUP_DEMO_SCRIPT[] = {
   "CL|0x2104",
@@ -356,6 +553,10 @@ void printHelp(Print &stream)
   stream.println("    Reply with ready.");
   stream.println("  SHOWIP");
   stream.println("    Reply with current Wi-Fi IP and UDP port.");
+  stream.println("  RESET");
+  stream.println("    Reply OK and restart ESP after a short delay.");
+  stream.println("  SS");
+  stream.println("    Return current scene snapshot as command lines with live values.");
   stream.println("  TF");
   stream.println("    Show all loaded TFT_eSPI and GFX font samples.");
   stream.println("  CL|color");
@@ -383,8 +584,8 @@ void printHelp(Print &stream)
   stream.println("    Draw horizontal progress bar.");
   stream.println("  CC|id|x|y|diameter|fill|outline|line");
   stream.println("    Draw circle. Use fill 0x0001 for no fill.");
-  stream.println("  SW|id|x|y|w|h|0/1|knob|outline|onfill");
-  stream.println("    Draw switch. 0 is off/left, 1 is on/right.");
+  stream.println("  SW|id|x|y|w|h|0/1|track|thumb");
+  stream.println("    Draw switch. Colors match TR/SB: track, thumb. 0 is off/left, 1 is on/right.");
   stream.println("  SB|id|x|y|w|h|H/V|value|max|track|thumb");
   stream.println("    Draw horizontal or vertical scrollbar.");
   stream.println("  BM|id|x|y|name|foreground|background|scale");
@@ -399,12 +600,11 @@ void printHelp(Print &stream)
   stream.println("  JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH");
   stream.println("    Draw a JPEG or selected source area. Scale: 1/4, 1/2, 1/1, 2/1, 4/1.");
   stream.println("    Example: JPG|1|20|20|/icons/play.jpg|1/2|0|0|64|64");
-  stream.println("  FW|path|size, FD|hex, FE");
+  stream.println("  FW|path|size, FD|hex, FDO|offset|hex, FE");
   stream.println("    Write a file to microSD through serial.");
   stream.println("  SC|path");
   stream.println("    Run a text script from microSD. Example: SC|/scripts/demo.nxt");
   stream.println("Colors are RGB565 numbers, for example 0x0000 black and 0xFFFF white.");
-  stream.println("Legacy aliases: C, L, I, B, W, S, T.");
 }
 
 void printSdStatus(Print &stream)
@@ -1090,9 +1290,7 @@ void drawBox(int id, int x, int y, int w, int h, uint16_t fill, uint16_t outline
 
 void drawFontTest()
 {
-  uiButtonCount = 0;
-  pressedButtonIndex = -1;
-  currentTouchButtonIndex = -1;
+  resetTouchRegistry();
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
@@ -1210,12 +1408,84 @@ void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, ui
   int knobY = y + h / 2;
   uint16_t filledTrack = lightenRgb565(thumb, 45);
 
+  if (!registerTouchControl(UI_TOUCH_TRACK, id, x, y, w, h, value, maximum, track, thumb)) {
+    tft.fillRect(x, y, w, h, currentScreenColor);
+  }
   tft.fillRoundRect(x, trackY, w, trackHeight, radius, track);
   tft.fillRoundRect(x, trackY, max(trackHeight, knobX - x), trackHeight, radius, filledTrack);
   tft.fillCircle(knobX, knobY, knobRadius, thumb);
   tft.drawCircle(knobX, knobY, knobRadius, TFT_BLACK);
 
   Serial.printf("GUI track %d rendered value=%d max=%d\n", id, value, maximum);
+}
+
+int trackKnobX(const UiTouchControl &control, int value)
+{
+  int maximum = max(control.maximum, 1);
+  int h = max<int>(control.h, 4);
+  int w = max<int>(control.w, h);
+  int knobRadius = h / 2;
+  int travel = max(1, w - h);
+  return control.x + knobRadius + (travel * constrain(value, 0, maximum)) / maximum;
+}
+
+void restoreTouchBackgroundRect(const UiTouchControl &control, int rx, int ry, int rw, int rh)
+{
+  int left = constrain(rx, static_cast<int>(control.x), static_cast<int>(control.x + control.w));
+  int top = constrain(ry, static_cast<int>(control.y), static_cast<int>(control.y + control.h));
+  int right = constrain(rx + rw, static_cast<int>(control.x), static_cast<int>(control.x + control.w));
+  int bottom = constrain(ry + rh, static_cast<int>(control.y), static_cast<int>(control.y + control.h));
+  int width = right - left;
+  int height = bottom - top;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+
+  if (control.background == nullptr || control.backgroundPixels == 0) {
+    tft.fillRect(left, top, width, height, currentScreenColor);
+    return;
+  }
+
+  int localX = left - control.x;
+  int localY = top - control.y;
+  for (int row = 0; row < height; ++row) {
+    uint16_t *line = control.background + (localY + row) * control.w + localX;
+    tft.pushImage(left, top + row, width, 1, line);
+  }
+}
+
+void drawTrackBarDirty(UiTouchControl &control, int oldValue, int newValue)
+{
+  int h = max<int>(control.h, 4);
+  int w = max<int>(control.w, h);
+  int trackHeight = max(2, h / 2);
+  int trackY = control.y + (h - trackHeight) / 2;
+  int radius = max(2, trackHeight / 2);
+  int knobRadius = h / 2;
+  int oldKnobX = trackKnobX(control, oldValue);
+  int newKnobX = trackKnobX(control, newValue);
+  int knobY = control.y + h / 2;
+  int dirtyLeft = min(oldKnobX, newKnobX) - knobRadius - 5;
+  int dirtyRight = max(oldKnobX, newKnobX) + knobRadius + 5;
+  uint16_t filledTrack = lightenRgb565(control.thumb, 45);
+
+  tft.fillCircle(oldKnobX, knobY, knobRadius + 1, currentScreenColor);
+
+  int trackLeft = max(static_cast<int>(control.x), dirtyLeft);
+  int trackRight = min(static_cast<int>(control.x + w), dirtyRight);
+  if (trackRight > trackLeft) {
+    tft.fillRect(trackLeft, trackY, trackRight - trackLeft, trackHeight, control.track);
+  }
+
+  int fillRight = max(control.x + trackHeight, newKnobX);
+  int filledLeft = max(static_cast<int>(control.x), dirtyLeft);
+  int filledRight = min(fillRight, dirtyRight);
+  if (filledRight > filledLeft) {
+    tft.fillRect(filledLeft, trackY, filledRight - filledLeft, trackHeight, filledTrack);
+  }
+
+  tft.fillCircle(newKnobX, knobY, knobRadius, control.thumb);
+  tft.drawCircle(newKnobX, knobY, knobRadius, TFT_BLACK);
 }
 
 void drawProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t fill, uint16_t background, uint16_t outline)
@@ -1245,7 +1515,7 @@ void drawProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t f
   Serial.printf("GUI progress %d rendered percent=%d\n", id, percent);
 }
 
-void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t knob, uint16_t outline, uint16_t onFill)
+void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t track, uint16_t thumb)
 {
   state = state == 0 ? 0 : 1;
   h = max(h, 8);
@@ -1256,13 +1526,20 @@ void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t knob, ui
   int knobRadius = max(2, (h - border * 4) / 2);
   int knobY = y + h / 2;
   int knobX = state ? (x + w - radius) : (x + radius);
+  uint16_t filledTrack = lightenRgb565(thumb, 45);
 
-  tft.fillRoundRect(x, y, w, h, radius, state ? onFill : TFT_BLACK);
-  tft.drawRoundRect(x, y, w, h, radius, outline);
-  for (int i = 1; i < border; i++) {
-    tft.drawRoundRect(x + i, y + i, w - i * 2, h - i * 2, max(1, radius - i), outline);
+  if (!registerTouchControl(UI_TOUCH_SWITCH, id, x, y, w, h, state, 1, track, thumb)) {
+    tft.fillRect(x, y, w, h, currentScreenColor);
   }
-  tft.fillCircle(knobX, knobY, knobRadius, knob);
+  tft.fillRoundRect(x, y, w, h, radius, track);
+  if (state) {
+    tft.fillRoundRect(x, y, max(h, knobX - x + knobRadius), h, radius, filledTrack);
+  }
+  tft.drawRoundRect(x, y, w, h, radius, track);
+  for (int i = 1; i < border; i++) {
+    tft.drawRoundRect(x + i, y + i, w - i * 2, h - i * 2, max(1, radius - i), track);
+  }
+  tft.fillCircle(knobX, knobY, knobRadius, thumb);
   tft.drawCircle(knobX, knobY, knobRadius, TFT_BLACK);
 
   Serial.printf("GUI switch %d rendered state=%d\n", id, state);
@@ -1465,6 +1742,29 @@ int findTouchedButton(uint16_t x, uint16_t y)
   return -1;
 }
 
+int findTouchedControl(uint16_t x, uint16_t y)
+{
+  for (int i = static_cast<int>(uiTouchControlCount) - 1; i >= 0; --i) {
+    const UiTouchControl &control = uiTouchControls[i];
+    if (x >= control.x && x < control.x + control.w && y >= control.y && y < control.y + control.h) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+int touchValueForControl(const UiTouchControl &control, uint16_t x)
+{
+  if (control.kind == UI_TOUCH_SWITCH) {
+    return x >= control.x + control.w / 2 ? 1 : 0;
+  }
+
+  int knobRadius = max(1, control.h / 2);
+  int travel = max(1, control.w - control.h);
+  int relativeX = constrain(static_cast<int>(x) - control.x - knobRadius, 0, travel);
+  return (relativeX * max(control.maximum, 1)) / travel;
+}
+
 void drawButtonPressedState(int buttonIndex, bool pressed)
 {
   if (buttonIndex < 0 || buttonIndex >= static_cast<int>(uiButtonCount)) {
@@ -1489,6 +1789,17 @@ void writeButtonEvent(Stream &stream, const UiButton &button, const char *event,
   stream.println(y);
 }
 
+void sendUdpEventLine(const String &line)
+{
+  if (!udpReady || !udpEventPeerReady || udpEventPeerPort == 0) {
+    return;
+  }
+
+  GuiUdp.beginPacket(udpEventPeerIp, udpEventPeerPort);
+  GuiUdp.print(line);
+  GuiUdp.endPacket();
+}
+
 void emitButtonEvent(int buttonIndex, const char *event, uint16_t x, uint16_t y)
 {
   if (buttonIndex < 0 || buttonIndex >= static_cast<int>(uiButtonCount)) {
@@ -1498,6 +1809,78 @@ void emitButtonEvent(int buttonIndex, const char *event, uint16_t x, uint16_t y)
   const UiButton &button = uiButtons[buttonIndex];
   writeButtonEvent(Serial, button, event, x, y);
   writeButtonEvent(UiSerial, button, event, x, y);
+  sendUdpEventLine(String("EV|BT|") + button.id + "|" + event + "|" + x + "|" + y + "\n");
+}
+
+const char *touchControlKindName(UiTouchKind kind)
+{
+  return kind == UI_TOUCH_SWITCH ? "SW" : "TR";
+}
+
+void writeTouchControlEvent(Stream &stream, const UiTouchControl &control,
+                            const char *event, uint16_t x, uint16_t y)
+{
+  stream.print("EV|");
+  stream.print(touchControlKindName(control.kind));
+  stream.print('|');
+  stream.print(control.id);
+  stream.print('|');
+  stream.print(event);
+  stream.print('|');
+  stream.print(control.value);
+  stream.print('|');
+  stream.print(x);
+  stream.print('|');
+  stream.println(y);
+}
+
+void emitTouchControlEvent(int controlIndex, const char *event, uint16_t x, uint16_t y)
+{
+  if (controlIndex < 0 || controlIndex >= static_cast<int>(uiTouchControlCount)) {
+    return;
+  }
+
+  const UiTouchControl &control = uiTouchControls[controlIndex];
+  writeTouchControlEvent(Serial, control, event, x, y);
+  writeTouchControlEvent(UiSerial, control, event, x, y);
+  sendUdpEventLine(String("EV|") + touchControlKindName(control.kind) + "|" +
+                   control.id + "|" + event + "|" + control.value + "|" + x + "|" + y + "\n");
+}
+
+void redrawTouchControl(int controlIndex)
+{
+  if (controlIndex < 0 || controlIndex >= static_cast<int>(uiTouchControlCount)) {
+    return;
+  }
+
+  const UiTouchControl control = uiTouchControls[controlIndex];
+  if (control.kind == UI_TOUCH_TRACK) {
+    drawTrackBar(control.id, control.x, control.y, control.w, control.h,
+                 control.value, control.maximum, control.track, control.thumb);
+  } else {
+    drawSwitch(control.id, control.x, control.y, control.w, control.h,
+               control.value, control.track, control.thumb);
+  }
+}
+
+void updatePressedTouchControl(uint16_t x, uint16_t y, const char *eventName)
+{
+  if (pressedTouchControlIndex < 0 ||
+      pressedTouchControlIndex >= static_cast<int>(uiTouchControlCount)) {
+    return;
+  }
+
+  UiTouchControl &control = uiTouchControls[pressedTouchControlIndex];
+  int newValue = touchValueForControl(control, x);
+  if (control.kind == UI_TOUCH_TRACK) {
+    if (newValue != control.value || strcmp(eventName, "DOWN") == 0) {
+      int oldValue = control.value;
+      control.value = newValue;
+      updateSceneControlValue(touchControlKindName(control.kind), control.id, newValue);
+      drawTrackBarDirty(control, oldValue, newValue);
+      emitTouchControlEvent(pressedTouchControlIndex, eventName, x, y);
+    }
+  }
 }
 
 void updateTouchButtons()
@@ -1519,19 +1902,51 @@ void updateTouchButtons()
         emitButtonEvent(pressedButtonIndex, "CLICK", lastTouchX, lastTouchY);
       }
     }
+    if (pressedTouchControlIndex >= 0) {
+      if (pressedTouchControlIndex < static_cast<int>(uiTouchControlCount) &&
+          currentTouchControlIndex == pressedTouchControlIndex &&
+          uiTouchControls[pressedTouchControlIndex].kind == UI_TOUCH_SWITCH) {
+        uiTouchControls[pressedTouchControlIndex].value =
+          uiTouchControls[pressedTouchControlIndex].value == 0 ? 1 : 0;
+        updateSceneControlValue(touchControlKindName(uiTouchControls[pressedTouchControlIndex].kind),
+                                uiTouchControls[pressedTouchControlIndex].id,
+                                uiTouchControls[pressedTouchControlIndex].value);
+        redrawTouchControl(pressedTouchControlIndex);
+        emitTouchControlEvent(pressedTouchControlIndex, "CHANGE", lastTouchX, lastTouchY);
+      }
+      emitTouchControlEvent(pressedTouchControlIndex, "UP", lastTouchX, lastTouchY);
+      if (currentTouchControlIndex == pressedTouchControlIndex) {
+        emitTouchControlEvent(pressedTouchControlIndex, "CLICK", lastTouchX, lastTouchY);
+      }
+    }
     pressedButtonIndex = -1;
     currentTouchButtonIndex = -1;
+    pressedTouchControlIndex = -1;
+    currentTouchControlIndex = -1;
     return;
   }
 
   lastTouchX = x;
   lastTouchY = y;
   currentTouchButtonIndex = findTouchedButton(x, y);
+  currentTouchControlIndex = currentTouchButtonIndex < 0 ? findTouchedControl(x, y) : -1;
 
   if (pressedButtonIndex < 0 && currentTouchButtonIndex >= 0) {
     pressedButtonIndex = currentTouchButtonIndex;
     drawButtonPressedState(pressedButtonIndex, true);
     emitButtonEvent(pressedButtonIndex, "DOWN", x, y);
+    return;
+  }
+
+  if (pressedTouchControlIndex < 0 && currentTouchControlIndex >= 0) {
+    pressedTouchControlIndex = currentTouchControlIndex;
+    emitTouchControlEvent(pressedTouchControlIndex, "DOWN", x, y);
+    updatePressedTouchControl(x, y, "CHANGE");
+    return;
+  }
+
+  if (pressedTouchControlIndex >= 0) {
+    updatePressedTouchControl(x, y, "CHANGE");
   }
 }
 
@@ -1567,6 +1982,18 @@ bool processCommand(char *line, Print &reply)
 
   if (strcmp(command, "HELP") == 0) {
     printHelp(reply);
+    return true;
+  }
+
+  if (strcmp(command, "RESET") == 0) {
+    reply.println("OK|RESET");
+    resetRequested = true;
+    resetAtMs = millis() + 200;
+    return true;
+  }
+
+  if (strcmp(command, "SS") == 0) {
+    printSceneSnapshot(reply);
     return true;
   }
 
@@ -1617,6 +2044,7 @@ bool processCommand(char *line, Print &reply)
     int srcH = parseIntField(strtok(nullptr, "|"), 0);
     bool ok = drawSdJpeg(id, x, y, path, scaleText, srcX, srcY, srcW, srcH, reply);
     if (ok) {
+      storeSceneLine("JPG", id, original);
       sendAck(reply, original, true);
     }
     return ok;
@@ -1650,24 +2078,24 @@ bool processCommand(char *line, Print &reply)
     return runSdScript(path, reply);
   }
 
-  if (strcmp(command, "C") == 0 || strcmp(command, "CL") == 0) {
+  if (strcmp(command, "CL") == 0) {
     uint16_t color = parseColor(strtok(nullptr, "|"), TFT_BLACK);
+    currentScreenColor = color;
     tft.fillScreen(color);
-    uiButtonCount = 0;
-    pressedButtonIndex = -1;
-    currentTouchButtonIndex = -1;
+    resetScene();
+    storeSceneLine("CL", -1, original);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "L") == 0 || strcmp(command, "BL") == 0) {
+  if (strcmp(command, "BL") == 0) {
     int enabled = parseIntField(strtok(nullptr, "|"), 1);
     setBacklight(enabled != 0);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "I") == 0 || strcmp(command, "IV") == 0) {
+  if (strcmp(command, "IV") == 0) {
     int enabled = parseIntField(strtok(nullptr, "|"), 1);
     tft.invertDisplay(enabled != 0);
     sendAck(reply, original, true);
@@ -1685,11 +2113,12 @@ bool processCommand(char *line, Print &reply)
     int radius = parseIntField(strtok(nullptr, "|"), 0);
     int lineWidth = parseIntField(strtok(nullptr, "|"), 1);
     drawBox(id, x, y, w, h, fill, outline, radius, lineWidth);
+    storeSceneLine(command, id, original);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "B") == 0 || strcmp(command, "BT") == 0) {
+  if (strcmp(command, "BT") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
@@ -1705,11 +2134,12 @@ bool processCommand(char *line, Print &reply)
     char vAlign = parseVerticalAlign(strtok(nullptr, "|"), 'C');
     drawButton(id, x, y, w, h, label ? label : "", fill, outline, text,
                lineWidth, font, hAlign, vAlign);
+    storeSceneLine("BT", id, original);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "W") == 0 || strcmp(command, "TW") == 0) {
+  if (strcmp(command, "TW") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
@@ -1720,26 +2150,26 @@ bool processCommand(char *line, Print &reply)
     uint16_t fill = parseColor(strtok(nullptr, "|"), TFT_DARKGREY);
     uint16_t outline = parseColor(strtok(nullptr, "|"), TFT_NAVY);
     drawTextWindow(id, x, y, w, h, title ? title : "", text ? text : "", fill, outline);
+    storeSceneLine("TW", id, original);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "S") == 0 || strcmp(command, "SB") == 0) {
+  if (strcmp(command, "SB") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
     int w = parseIntField(strtok(nullptr, "|"));
     int h = parseIntField(strtok(nullptr, "|"));
     char orientation = h >= w ? 'V' : 'H';
-    if (strcmp(command, "SB") == 0) {
-      char *orientationField = strtok(nullptr, "|");
-      orientation = orientationField && orientationField[0] ? orientationField[0] : orientation;
-    }
+    char *orientationField = strtok(nullptr, "|");
+    orientation = orientationField && orientationField[0] ? orientationField[0] : orientation;
     int value = parseIntField(strtok(nullptr, "|"));
     int maximum = parseIntField(strtok(nullptr, "|"), 100);
     uint16_t track = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_CYAN);
     drawScrollBar(id, x, y, w, h, orientation, value, maximum, track, thumb);
+    storeSceneLine("SB", id, original);
     sendAck(reply, original, true);
     return true;
   }
@@ -1755,6 +2185,7 @@ bool processCommand(char *line, Print &reply)
     uint16_t track = parseColor(strtok(nullptr, "|"), TFT_DARKGREY);
     uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
     drawTrackBar(id, x, y, w, h, value, maximum, track, thumb);
+    storeSceneLine("TR", id, original);
     sendAck(reply, original, true);
     return true;
   }
@@ -1770,6 +2201,7 @@ bool processCommand(char *line, Print &reply)
     uint16_t background = parseColor(strtok(nullptr, "|"), TFT_WHITE);
     uint16_t outline = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
     drawProgressBar(id, x, y, w, h, percent, fill, background, outline);
+    storeSceneLine("PB", id, original);
     sendAck(reply, original, true);
     return true;
   }
@@ -1783,6 +2215,7 @@ bool processCommand(char *line, Print &reply)
     uint16_t outline = parseColor(strtok(nullptr, "|"), fill);
     int lineWidth = parseIntField(strtok(nullptr, "|"), 1);
     drawCircleComponent(id, x, y, d, fill, outline, lineWidth);
+    storeSceneLine("CC", id, original);
     sendAck(reply, original, true);
     return true;
   }
@@ -1794,15 +2227,15 @@ bool processCommand(char *line, Print &reply)
     int w = parseIntField(strtok(nullptr, "|"));
     int h = parseIntField(strtok(nullptr, "|"));
     int state = parseIntField(strtok(nullptr, "|"));
-    uint16_t knob = parseColor(strtok(nullptr, "|"), TFT_GREEN);
-    uint16_t outline = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
-    uint16_t onFill = parseColor(strtok(nullptr, "|"), 0x8E66);
-    drawSwitch(id, x, y, w, h, state, knob, outline, onFill);
+    uint16_t track = parseColor(strtok(nullptr, "|"), TFT_DARKGREY);
+    uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_GREEN);
+    drawSwitch(id, x, y, w, h, state, track, thumb);
+    storeSceneLine("SW", id, original);
     sendAck(reply, original, true);
     return true;
   }
 
-  if (strcmp(command, "T") == 0 || strcmp(command, "TX") == 0) {
+  if (strcmp(command, "TX") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
     int y = parseIntField(strtok(nullptr, "|"));
@@ -1815,6 +2248,7 @@ bool processCommand(char *line, Print &reply)
     char hAlign = parseHorizontalAlign(strtok(nullptr, "|"), w > 0 ? 'C' : 'L');
     char vAlign = parseVerticalAlign(strtok(nullptr, "|"), h > 0 ? 'C' : 'T');
     drawTextLabel(id, x, y, w, h, text ? text : "", color, background, font, hAlign, vAlign);
+    storeSceneLine("TX", id, original);
     sendAck(reply, original, true);
     return true;
   }
@@ -1828,6 +2262,7 @@ bool processCommand(char *line, Print &reply)
     uint16_t background = parseColor(strtok(nullptr, "|"), COLOR_TRANSPARENT);
     int scale = parseIntField(strtok(nullptr, "|"), 2);
     drawMonoBitmapAsset(id, x, y, name ? name : "", foreground, background, scale);
+    storeSceneLine("BM", id, original);
     sendAck(reply, original, true);
     return true;
   }
@@ -1879,6 +2314,9 @@ void readUdpCommands()
     return;
   }
   udpCommand[readCount] = '\0';
+  udpEventPeerIp = GuiUdp.remoteIP();
+  udpEventPeerPort = GuiUdp.remotePort();
+  udpEventPeerReady = true;
 
   char *line = udpCommand;
   while (*line != '\0' && isspace(static_cast<unsigned char>(*line))) {
@@ -1937,7 +2375,7 @@ void setup()
   setBacklight(true);
   startOta();
 
-  Serial.println("Commands: HELP, SD, LS|path, JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH, FW|path|size, FD|hex, FE, SC|path, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V, TX|id|x|y|text|color|bg|font|w|h|H|V, TW|id|x|y|w|h|title|text|fill|outline, RR|id|x|y|w|h|fill|outline|radius|line, TR|id|x|y|w|h|value|max|track|thumb, PB|id|x|y|w|h|percent|fill|background|outline, CC|id|x|y|diameter|fill|outline|line, SW|id|x|y|w|h|0/1|knob|outline|onfill, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
+  Serial.println("Commands: ?, HELP, SHOWIP, RESET, SS, TF, SD, LS|path, FS|path, FW|path|size, FD|hex, FDO|offset|hex, FE, SC|path, JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V, BX|id|x|y|w|h|fill|outline|radius|line, RR|id|x|y|w|h|fill|outline|radius|line, TX|id|x|y|text|color|bg|font|w|h|H|V, TW|id|x|y|w|h|title|text|fill|outline, TR|id|x|y|w|h|value|max|track|thumb, PB|id|x|y|w|h|percent|fill|background|outline, CC|id|x|y|diameter|fill|outline|line, SW|id|x|y|w|h|0/1|track|thumb, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
   sendReady(Serial);
   sendReady(UiSerial);
 }
@@ -1952,6 +2390,14 @@ void loop()
       delay(1);
       return;
     }
+  }
+  if (resetRequested && static_cast<int32_t>(millis() - resetAtMs) >= 0) {
+    Serial.println("RESET now");
+    Serial.flush();
+    UiSerial.println("RESET now");
+    UiSerial.flush();
+    delay(20);
+    ESP.restart();
   }
   updateTouchButtons();
   readCommandStream(Serial, usbCommand, usbCommandLength);

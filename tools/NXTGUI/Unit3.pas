@@ -55,6 +55,7 @@ type
     procedure UpdateSpinLimits;
   public
     function ExecuteCrop(const AFileName: string; var ASrcX, ASrcY, ASrcW, ASrcH: Integer): Boolean;
+    function ExecuteCropWithScale(const AFileName: string; var ASrcX, ASrcY, ASrcW, ASrcH, AScalePercent: Integer): Boolean;
   end;
 
 var
@@ -168,6 +169,14 @@ begin
 end;
 
 function TForm3.ExecuteCrop(const AFileName: string; var ASrcX, ASrcY, ASrcW, ASrcH: Integer): Boolean;
+var
+  ScalePercent: Integer;
+begin
+  ScalePercent := 100;
+  Result := ExecuteCropWithScale(AFileName, ASrcX, ASrcY, ASrcW, ASrcH, ScalePercent);
+end;
+
+function TForm3.ExecuteCropWithScale(const AFileName: string; var ASrcX, ASrcY, ASrcW, ASrcH, AScalePercent: Integer): Boolean;
 begin
   Result := False;
   if not FileExists(AFileName) then
@@ -210,9 +219,11 @@ begin
     ASrcY := SpinEdit2.Value;
     ASrcW := SpinEdit3.Value;
     ASrcH := SpinEdit4.Value;
+    AScalePercent := TrackBar1.Position;
+    if AScalePercent < 1 then
+      AScalePercent := 1;
   end;
 end;
-
 procedure TForm3.PaintBox1Paint(Sender: TObject);
 var
   Scale: Double;

@@ -64,8 +64,6 @@ type
     Label15: TLabel;
     Label16: TLabel;
     SpinEdit6: TSpinEdit;
-    Label17: TLabel;
-    SpinEdit7: TSpinEdit;
     StringGrid1: TStringGrid;
     Button3: TButton;
     Shape3: TShape;
@@ -91,14 +89,6 @@ type
     ListBox1: TListBox;
     Button8: TButton;
     Button9: TButton;
-    RadioGroup1: TRadioGroup;
-    RadioButton1: TRadioButton;
-    RadioButton2: TRadioButton;
-    RadioButton3: TRadioButton;
-    RadioGroup2: TRadioGroup;
-    RadioButton4: TRadioButton;
-    RadioButton5: TRadioButton;
-    RadioButton6: TRadioButton;
     Shape1: TShape;
     Shape5: TShape;
     Button10: TButton;
@@ -110,7 +100,6 @@ type
     Button12: TButton;
     Button13: TButton;
     StringGrid2: TStringGrid;
-    TrackBar2: TTrackBar;
     Shape6: TShape;
     Shape7: TShape;
     Shape8: TShape;
@@ -122,6 +111,13 @@ type
     Label26: TLabel;
     Shape10: TShape;
     CheckBox4: TCheckBox;
+    ComboBox2: TComboBox;
+    Label28: TLabel;
+    ComboBox3: TComboBox;
+    Label27: TLabel;
+    Label29: TLabel;
+    Edit4: TEdit;
+    Label17: TLabel;
     procedure FormCreate(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure Button9Click(Sender: TObject);
@@ -134,6 +130,7 @@ type
     FResizing: Boolean;
     FDragStart: TPoint;
     FDragRect: TRect;
+    FUdpSocket: TSocket;
     FPortMonitor: TTimer;
     FPortRxText: AnsiString;
     FLoadingInputs: Boolean;
@@ -152,6 +149,7 @@ type
     FDefaultFgRgb: string;
     FDefaultBgRgb: string;
     FDefaultLcdBgRgb: string;
+    FNoColorLabels: array[TColorField] of TLabel;
     procedure InitGrid;
     procedure InitControls;
     procedure AddPaletteHandlers;
@@ -169,6 +167,7 @@ type
     procedure SetAlignButtons(const AHAlign, AVAlign: string);
     function Rgb565Text(AColor: TColor): string;
     function Rgb565ToColor(const AText: string; ADefault: TColor): TColor;
+    function IsNoColorRgb(const AText: string): Boolean;
     function ScriptFromRow(ARow: Integer): string;
     function SdRootPath: string;
     function SdCommandPathFromLocalPath(const AFileName: string): string;
@@ -184,6 +183,8 @@ type
     procedure DuplicateSelectedRow;
     procedure UpdateRowFromInputs(ARow: Integer);
     procedure LoadInputsFromRow(ARow: Integer);
+    procedure UpdateDefaultColorsFromRow(ARow: Integer);
+    procedure UpdateEditorControlStates;
     procedure SelectRow(ARow: Integer);
     procedure DeleteSelectedRow;
     procedure RepaintPreview;
@@ -195,11 +196,15 @@ type
     procedure SaveSettings;
     procedure SetActiveColorField(AField: TColorField);
     procedure RefreshColorFieldShapes;
+    procedure EnsureNoColorLabels;
     procedure ApplyPaletteColorToActiveField(const ARgb: string; AColor: TColor);
     procedure ColorFieldMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
     function SerialEnabled: Boolean;
     function UdpEnabled: Boolean;
+    function EnsureUdpSocket(ABroadcast: Boolean): Boolean;
+    procedure CloseUdpSocket;
     function UdpExchangeLine(const ALine, AHost: string; ABroadcast: Boolean; var AReply: string): Boolean;
+    procedure PollUdpInput;
     function SendUdpLine(const ALine: string): Boolean;
     procedure SendSerialLine(const ALine: string);
     procedure SendLine(const ALine: string);
@@ -226,12 +231,13 @@ type
     procedure PaletteGridMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
     procedure ColorGridClick(Sender: TObject);
     procedure InputSpinChange(Sender: TObject);
+    procedure TextEditChange(Sender: TObject);
     procedure RtsCheckClick(Sender: TObject);
     procedure UdpCheckClick(Sender: TObject);
     procedure LineTrackChange(Sender: TObject);
-    procedure RadiusTrackChange(Sender: TObject);
+
     procedure FontListClick(Sender: TObject);
-    procedure AlignRadioClick(Sender: TObject);
+    procedure AlignComboChange(Sender: TObject);
     procedure DoubleButtonClick(Sender: TObject);
     procedure DeleteButtonClick(Sender: TObject);
     procedure ClearButtonClick(Sender: TObject);
@@ -260,6 +266,8 @@ uses
 
 {$R *.dfm}
 
+//============================================================
+//
 const
   COL_SEL = 0;
   COL_CMD = 1;
@@ -297,7 +305,8 @@ const
     'FreeSansBold16.h',
     'FreeSansBold18.h'
   );
-
+//======================================================
+// Преобразует имя COM-порта в формат WinAPI для открытия порта.
 function PortWinApiName(const APortName: string): string;
 begin
   if Pos('\\.\', APortName) = 1 then
@@ -305,7 +314,8 @@ begin
   else
     Result := '\\.\' + APortName;
 end;
-
+//======================================================
+// Корректно определяет путь к папке размещения шрифтов, которые отобразятся на виртуальном дисплее.
 function FontsRusDir: string;
 var
   Candidate: string;
@@ -318,6 +328,8 @@ begin
     Result := LEGACY_FONT_RUS_DIR;
 end;
 
+//======================================================
+// Возвращает цвет ячейки встроенной палитры по её индексу.
 function PaletteCellColor(AIndex: Integer): TColor;
 const
   COLORS: array[0..30] of TColor = (
@@ -337,6 +349,8 @@ begin
     Result := clBtnFace;
 end;
 
+//======================================================
+// Преобразует цвет Windows в текстовое RGB565 значение для ESP.
 function ColorToRgb565Text(AColor: TColor): string;
 var
   C: TColor;
@@ -353,20 +367,22 @@ begin
   Result := '0x' + IntToHex(V, 4);
 end;
 
+//======================================================
+// Возвращает RGB565-текст цвета выбранной ячейки палитры.
 function PaletteCellRgb565(AIndex: Integer): string;
 begin
-  if AIndex = 31 then
-    Result := '0x0001'
-  else
-    Result := ColorToRgb565Text(PaletteCellColor(AIndex));
+  Result := ColorToRgb565Text(PaletteCellColor(AIndex));
 end;
 
+//======================================================
+// Инициализирует форму, рабочие структуры, сетевой стек и стартовое состояние редактора.
 procedure TForm1.FormCreate(Sender: TObject);
 var
   WsaData: TWSAData;
 begin
   WSAStartup($0202, WsaData);
   FPort := INVALID_HANDLE_VALUE;
+  FUdpSocket := INVALID_SOCKET;
   FPortMonitor := nil;
   FPortRxText := '';
   FLoadingInputs := False;
@@ -393,12 +409,15 @@ begin
   RepaintPreview;
 end;
 
+//======================================================
+// Сохраняет настройки и освобождает ресурсы при закрытии приложения.
 procedure TForm1.FormClose(Sender: TObject; var Action: TCloseAction);
 var
   I: Integer;
 begin
   SaveSettings;
   ClosePort;
+  CloseUdpSocket;
   for I := 0 to FFontCache.Count - 1 do
     TGfxFont(FFontCache[I]).Free;
   FFontCache.Free;
@@ -406,6 +425,8 @@ begin
   WSACleanup;
 end;
 
+//======================================================
+// Настраивает таблицу команд и её колонки.
 procedure TForm1.InitGrid;
 begin
   StringGrid1.ColCount := 19;
@@ -459,6 +480,8 @@ begin
   StringGrid1.OnSetEditText := GridSetEditText;
 end;
 
+//======================================================
+// Создаёт и настраивает дополнительные элементы управления редактора.
 procedure TForm1.InitControls;
 var
   I: Integer;
@@ -487,9 +510,11 @@ begin
   SpinEdit4.MaxValue := 320;
   SpinEdit5.MaxValue := 80;
   SpinEdit6.MaxValue := 100;
-  SpinEdit7.MaxValue := 1;
   SpinEdit5.OnChange := InputSpinChange;
   SpinEdit6.OnChange := InputSpinChange;
+  if Edit4.Text = 'Edit4' then
+    Edit4.Text := 'Text';
+  Edit4.OnChange := TextEditChange;
 
   Shape4.OnMouseDown := Shape4MouseDown;
   Button2.OnClick := SendButtonClick;
@@ -508,6 +533,7 @@ begin
   Shape7.OnMouseDown := ColorFieldMouseDown;
   Shape8.OnMouseDown := ColorFieldMouseDown;
   Shape9.OnMouseDown := ColorFieldMouseDown;
+  EnsureNoColorLabels;
   RefreshColorFieldShapes;
   ColorGrid1.Visible := False;
   ColorGrid1.OnClick := ColorGridClick;
@@ -572,13 +598,6 @@ begin
   FLineTrack.Frequency := 1;
   FLineTrack.Position := 1;
   FLineTrack.OnChange := LineTrackChange;
-  if Assigned(TrackBar2) then
-  begin
-    TrackBar2.Min := 0;
-    TrackBar2.Max := 80;
-    TrackBar2.Frequency := 5;
-    TrackBar2.OnChange := RadiusTrackChange;
-  end;
 
   if FindComponent('ListBox1') is TListBox then
     FFontList := TListBox(FindComponent('ListBox1'))
@@ -599,15 +618,12 @@ begin
   end;
   LoadEspFontList;
   FFontList.OnClick := FontListClick;
-
-  RadioButton3.Checked := True;
-  RadioButton6.Checked := True;
-  RadioButton1.OnClick := AlignRadioClick;
-  RadioButton2.OnClick := AlignRadioClick;
-  RadioButton3.OnClick := AlignRadioClick;
-  RadioButton4.OnClick := AlignRadioClick;
-  RadioButton5.OnClick := AlignRadioClick;
-  RadioButton6.OnClick := AlignRadioClick;
+  ComboBox2.Style := csDropDownList;
+  ComboBox3.Style := csDropDownList;
+  ComboBox2.ItemIndex := 1;
+  ComboBox3.ItemIndex := 1;
+  ComboBox2.OnChange := AlignComboChange;
+  ComboBox3.OnChange := AlignComboChange;
   SetPortStateColor(clGreen);
   SetUdpStateColor(clGreen);
 
@@ -618,6 +634,8 @@ begin
   LoadSettings;
 end;
 
+//======================================================
+// Привязывает элементы палитры компонентов к обработчикам добавления.
 procedure TForm1.AddPaletteHandlers;
 begin
   StaticText1.Hint := 'TX';
@@ -625,26 +643,27 @@ begin
   Image1.Hint := 'SW';
   Image2.Hint := 'TR';
   Image3.Hint := 'PB';
-  Image4.Hint := 'JPG';
   Shape2.Hint := 'CC';
-  Shape3.Hint := 'RR';
+  Shape3.Hint := 'BX';
+  Shape10.Hint := 'RR';
   Label10.Hint := 'BT';
   Label11.Hint := 'TR';
   Label12.Hint := 'JPG';
-  Label13.Hint := 'RR';
+  Label13.Hint := 'BX';
   Label15.Hint := 'CC';
   Label20.Hint := 'SW';
   Label21.Hint := 'PB';
   Label22.Hint := 'TX';
+  Label26.Hint := 'RR';
 
   StaticText1.OnClick := PaletteElementClick;
   StaticText2.OnClick := PaletteElementClick;
   Image1.OnClick := PaletteElementClick;
   Image2.OnClick := PaletteElementClick;
   Image3.OnClick := PaletteElementClick;
-  Image4.OnClick := PaletteElementClick;
   Shape2.OnMouseDown := PaletteShapeMouseDown;
   Shape3.OnMouseDown := PaletteShapeMouseDown;
+  Shape10.OnMouseDown := PaletteShapeMouseDown;
   Label10.OnClick := PaletteElementClick;
   Label11.OnClick := PaletteElementClick;
   Label12.OnClick := PaletteElementClick;
@@ -653,8 +672,11 @@ begin
   Label20.OnClick := PaletteElementClick;
   Label21.OnClick := PaletteElementClick;
   Label22.OnClick := PaletteElementClick;
+  Label26.OnClick := PaletteElementClick;
 end;
 
+//======================================================
+// Преобразует цвет VCL в строку RGB565 для команд дисплея.
 function TForm1.Rgb565Text(AColor: TColor): string;
 var
   C: TColor;
@@ -671,6 +693,15 @@ begin
   Result := '0x' + IntToHex(V, 4);
 end;
 
+//======================================================
+// Проверяет, обозначает ли RGB565-строка отсутствие цвета.
+function TForm1.IsNoColorRgb(const AText: string): Boolean;
+begin
+  Result := UpperCase(Trim(AText)) = '0X0001';
+end;
+
+//======================================================
+// Преобразует RGB565-строку обратно в цвет VCL.
 function TForm1.Rgb565ToColor(const AText: string; ADefault: TColor): TColor;
 var
   S: string;
@@ -694,6 +725,8 @@ begin
   Result := RGB(R, G, B);
 end;
 
+//======================================================
+// Осветляет цвет на заданный процент для предпросмотра.
 function LightenColor(AColor: TColor; Amount: Integer): TColor;
 var
   C: TColor;
@@ -715,6 +748,8 @@ begin
   Result := RGB(R, G, B);
 end;
 
+//======================================================
+// Разделяет командную строку на поля по символу вертикальной черты.
 procedure SplitPipe(const S: string; Parts: TStrings);
 var
   I: Integer;
@@ -733,6 +768,8 @@ begin
   Parts.Add(Copy(S, StartPos, MaxInt));
 end;
 
+//======================================================
+// Удаляет однострочные комментарии из текста C/C++.
 function RemoveLineComments(const S: string): string;
 var
   I: Integer;
@@ -766,6 +803,8 @@ begin
   end;
 end;
 
+//======================================================
+// Извлекает блок в фигурных скобках после заданного маркера.
 function ExtractBraceBlock(const S, Marker: string): string;
 var
   P: Integer;
@@ -793,6 +832,8 @@ begin
   Result := Copy(S, B + 1, E - B - 1);
 end;
 
+//======================================================
+// Разбирает числовой массив из C/C++ текста.
 function ParseCNumbers(const S: string): TIntegerArray;
 var
   I: Integer;
@@ -831,6 +872,8 @@ begin
   end;
 end;
 
+//======================================================
+// Загружает список доступных ESP/GFX шрифтов для выбора в редакторе.
 procedure TForm1.LoadEspFontList;
 var
   I: Integer;
@@ -864,11 +907,15 @@ begin
     FFontList.ItemIndex := 0;
 end;
 
+//======================================================
+// Применяет выбранный шрифт к виртуальному предпросмотру.
 procedure TForm1.ApplyPreviewFont(AFontId: Integer);
 begin
   FActiveFontId := AFontId;
 end;
 
+//======================================================
+// Возвращает объект шрифта предпросмотра по его номеру.
 function TForm1.GetPreviewFont(AFontId: Integer): TGfxFont;
 begin
   Result := nil;
@@ -883,6 +930,8 @@ begin
     LoadGfxFontFile(Result);
 end;
 
+//======================================================
+// Загружает данные GFX-шрифта из файла для локальной отрисовки.
 function TForm1.LoadGfxFontFile(AFont: TGfxFont): Boolean;
 var
   SL: TStringList;
@@ -949,6 +998,8 @@ begin
   Result := (Length(AFont.Bitmaps) > 0) and (Length(AFont.Glyphs) > 0);
 end;
 
+//======================================================
+// Определяет код глифа GFX-шрифта для символа.
 function TForm1.GfxGlyphCode(AChar: AnsiChar): Integer;
 var
   C: Integer;
@@ -966,6 +1017,8 @@ begin
     Result := C;
 end;
 
+//======================================================
+// Вычисляет границы строки, нарисованной GFX-шрифтом.
 procedure TForm1.GfxTextBounds(AFont: TGfxFont; const AText: string; var AMinX, AMinY, AMaxX, AMaxY: Integer);
 var
   I: Integer;
@@ -1021,6 +1074,8 @@ begin
     AMaxX := CursorX;
 end;
 
+//======================================================
+// Рисует строку GFX-шрифтом на виртуальном дисплее.
 procedure TForm1.DrawGfxText(AFont: TGfxFont; const AText: string; ABaselineX, ABaselineY: Integer; AColor: TColor);
 var
   I: Integer;
@@ -1070,6 +1125,8 @@ begin
   end;
 end;
 
+//======================================================
+// Рисует текст GFX-шрифтом внутри прямоугольной области с выравниванием.
 function TForm1.DrawGfxTextBox(const AText: string; const ARect: TRect; AHAlign, AVAlign: string; AColor: TColor): Boolean;
 var
   Font: TGfxFont;
@@ -1112,31 +1169,39 @@ begin
   Result := True;
 end;
 
+//======================================================
+// Выводит текст предпросмотра с текущим горизонтальным и вертикальным выравниванием.
 procedure TForm1.DrawAlignedPreviewText(const AText: string; const ARect: TRect; AHAlign, AVAlign: string);
 begin
   DrawGfxTextBox(AText, ARect, AHAlign, AVAlign, FPreview.Canvas.Font.Color);
 end;
 
+//======================================================
+// Возвращает выбранное горизонтальное выравнивание текста.
 function TForm1.SelectedHAlign: string;
 begin
-  if RadioButton4.Checked then
-    Result := 'L'
-  else if RadioButton5.Checked then
-    Result := 'R'
+  case ComboBox2.ItemIndex of
+    0: Result := 'L';
+    2: Result := 'R';
   else
     Result := 'C';
+  end;
 end;
 
+//======================================================
+// Возвращает выбранное вертикальное выравнивание текста.
 function TForm1.SelectedVAlign: string;
 begin
-  if RadioButton1.Checked then
-    Result := 'T'
-  else if RadioButton2.Checked then
-    Result := 'B'
+  case ComboBox3.ItemIndex of
+    0: Result := 'T';
+    2: Result := 'B';
   else
     Result := 'C';
+  end;
 end;
 
+//======================================================
+// Устанавливает состояние списков выбора выравнивания по значениям строки.
 procedure TForm1.SetAlignButtons(const AHAlign, AVAlign: string);
 var
   H: string;
@@ -1144,14 +1209,24 @@ var
 begin
   H := UpperCase(Trim(AHAlign));
   V := UpperCase(Trim(AVAlign));
-  RadioButton4.Checked := H = 'L';
-  RadioButton5.Checked := H = 'R';
-  RadioButton6.Checked := not (RadioButton4.Checked or RadioButton5.Checked);
-  RadioButton1.Checked := V = 'T';
-  RadioButton2.Checked := V = 'B';
-  RadioButton3.Checked := not (RadioButton1.Checked or RadioButton2.Checked);
+
+  if H = 'L' then
+    ComboBox2.ItemIndex := 0
+  else if H = 'R' then
+    ComboBox2.ItemIndex := 2
+  else
+    ComboBox2.ItemIndex := 1;
+
+  if V = 'T' then
+    ComboBox3.ItemIndex := 0
+  else if V = 'B' then
+    ComboBox3.ItemIndex := 2
+  else
+    ComboBox3.ItemIndex := 1;
 end;
 
+//======================================================
+// Формирует команду ESP из одной строки таблицы редактора.
 function TForm1.ScriptFromRow(ARow: Integer): string;
 var
   Cmd: string;
@@ -1184,9 +1259,9 @@ begin
        StringGrid1.Cells[COL_H, ARow], StringGrid1.Cells[COL_TEXT, ARow],
        '100', StringGrid1.Cells[COL_C1, ARow],
        StringGrid1.Cells[COL_C2, ARow]])
-  else if Cmd = 'RR' then
-    Result := Format('RR|%s|%s|%s|%s|%s|%s|%s|%s|%s',
-      [StringGrid1.Cells[COL_ID, ARow], StringGrid1.Cells[COL_X, ARow],
+  else if (Cmd = 'BX') or (Cmd = 'RR') then
+    Result := Format('%s|%s|%s|%s|%s|%s|%s|%s|%s|%s',
+      [Cmd, StringGrid1.Cells[COL_ID, ARow], StringGrid1.Cells[COL_X, ARow],
        StringGrid1.Cells[COL_Y, ARow], StringGrid1.Cells[COL_W, ARow],
        StringGrid1.Cells[COL_H, ARow], StringGrid1.Cells[COL_C1, ARow],
        StringGrid1.Cells[COL_C2, ARow], StringGrid1.Cells[COL_EXTRA, ARow],
@@ -1211,13 +1286,19 @@ begin
        StringGrid1.Cells[COL_TEXT, ARow], '100',
        StringGrid1.Cells[COL_C1, ARow], StringGrid1.Cells[COL_C2, ARow]])
   end
-  else if (Cmd = 'PB') or (Cmd = 'SW') then
+  else if Cmd = 'PB' then
     Result := Format('%s|%s|%s|%s|%s|%s|%s|%s|%s|%s',
       [Cmd, StringGrid1.Cells[COL_ID, ARow], StringGrid1.Cells[COL_X, ARow],
        StringGrid1.Cells[COL_Y, ARow], StringGrid1.Cells[COL_W, ARow],
        StringGrid1.Cells[COL_H, ARow], StringGrid1.Cells[COL_TEXT, ARow],
        StringGrid1.Cells[COL_C1, ARow], StringGrid1.Cells[COL_C2, ARow],
        StringGrid1.Cells[COL_EXTRA, ARow]])
+  else if Cmd = 'SW' then
+    Result := Format('SW|%s|%s|%s|%s|%s|%s|%s|%s',
+      [StringGrid1.Cells[COL_ID, ARow], StringGrid1.Cells[COL_X, ARow],
+       StringGrid1.Cells[COL_Y, ARow], StringGrid1.Cells[COL_W, ARow],
+       StringGrid1.Cells[COL_H, ARow], StringGrid1.Cells[COL_TEXT, ARow],
+       StringGrid1.Cells[COL_C1, ARow], StringGrid1.Cells[COL_C2, ARow]])
   else if Cmd = 'CC' then
     Result := Format('CC|%s|%s|%s|%s|%s|%s|%s',
       [StringGrid1.Cells[COL_ID, ARow], StringGrid1.Cells[COL_X, ARow],
@@ -1241,11 +1322,15 @@ begin
     Result := '';
 end;
 
+//======================================================
+// Возвращает локальную папку, соответствующую содержимому SD-карты.
 function TForm1.SdRootPath: string;
 begin
   Result := ExpandFileName(ExtractFilePath(ParamStr(0)) + '..\..\sd\');
 end;
 
+//======================================================
+// Преобразует локальный путь файла в путь команды для SD-карты ESP.
 function TForm1.SdCommandPathFromLocalPath(const AFileName: string): string;
 var
   Root: string;
@@ -1267,6 +1352,8 @@ begin
   Result := '/' + StringReplace(Result, '\', '/', [rfReplaceAll]);
 end;
 
+//======================================================
+// Преобразует путь картинки из команды в локальный путь на компьютере.
 function TForm1.LocalImagePathFromCommandPath(const APath: string): string;
 var
   RelPath: string;
@@ -1288,6 +1375,8 @@ begin
   end;
 end;
 
+//======================================================
+// Открывает редактор области картинки для выбранной JPG-строки.
 procedure TForm1.OpenImageAreaEditor(ARow: Integer);
 var
   FileName: string;
@@ -1330,6 +1419,8 @@ begin
   end;
 end;
 
+//======================================================
+// Нормализует текст масштаба JPG к поддерживаемым значениям.
 function NormalizeJpgScaleText(const AScale: string): string;
 var
   S: string;
@@ -1348,6 +1439,8 @@ begin
     Result := '1/1';
 end;
 
+//======================================================
+// Преобразует текст масштаба JPG в числитель и знаменатель.
 procedure JpgScaleRatio(const AScale: string; var ANumerator, ADenominator: Integer);
 var
   S: string;
@@ -1380,6 +1473,8 @@ begin
   end;
 end;
 
+//======================================================
+// Пересчитывает размер JPG-элемента с учётом выбранной области и масштаба.
 procedure TForm1.UpdateImageRowSize(ARow: Integer);
 var
   Picture: TPicture;
@@ -1429,6 +1524,8 @@ begin
   end;
 end;
 
+//======================================================
+// Преобразует байт в двухсимвольную HEX-строку.
 function HexByte(AValue: Byte): string;
 const
   HexChars: array[0..15] of Char = '0123456789ABCDEF';
@@ -1436,6 +1533,8 @@ begin
   Result := HexChars[AValue shr 4] + HexChars[AValue and $0F];
 end;
 
+//======================================================
+// Ожидает ответ ESP по serial с заданным префиксом.
 function TForm1.WaitSerialReply(const APrefix: string; ATimeoutMs: DWORD; var ALine: string): Boolean;
 var
   Buffer: array[0..127] of AnsiChar;
@@ -1490,6 +1589,8 @@ begin
   StatusBar1.SimpleText := 'Serial timeout waiting: ' + APrefix;
 end;
 
+//======================================================
+// Передаёт локальный файл картинки на SD-карту ESP.
 function TForm1.SendFileToEspSd(const ALocalFileName: string; var ASdPath: string): Boolean;
 const
   CHUNK_SIZE = 64;
@@ -1506,6 +1607,7 @@ var
   MonitorWasEnabled: Boolean;
   UseUdp: Boolean;
   ChannelName: string;
+  RemoteSize: Int64;
 
   function SendUploadLine(const ALine, AOkPrefix: string; ATimeoutMs: DWORD): Boolean;
   var
@@ -1533,13 +1635,13 @@ var
       Result := False;
   end;
 
-  function RemoteFileSizeMatches(AExpectedSize: Int64): Boolean;
+  function RemoteFileExists(var ARemoteSize: Int64): Boolean;
   var
     P: Integer;
-    RemoteSize: Int64;
     SizeText: string;
   begin
     Result := False;
+    ARemoteSize := -1;
     ReplyLine := '';
     if not SendUploadLine('FS|' + ASdPath, 'OK|FS|', 1500) then
       Exit;
@@ -1549,33 +1651,8 @@ var
       Exit;
 
     SizeText := Trim(Copy(ReplyLine, P + 1, MaxInt));
-    RemoteSize := StrToInt64Def(SizeText, -1);
-    Result := RemoteSize = AExpectedSize;
-  end;
-
-  function RenameSdPath(const APath: string): string;
-  var
-    SlashPos: Integer;
-    DotPos: Integer;
-    Folder: string;
-    NamePart: string;
-    ExtPart: string;
-  begin
-    SlashPos := LastDelimiter('/', APath);
-    DotPos := LastDelimiter('.', APath);
-    if (DotPos <= SlashPos) or (DotPos = 0) then
-    begin
-      NamePart := APath;
-      ExtPart := '';
-    end
-    else
-    begin
-      NamePart := Copy(APath, 1, DotPos - 1);
-      ExtPart := Copy(APath, DotPos, MaxInt);
-    end;
-
-    Folder := '';
-    Result := Folder + NamePart + '_' + IntToStr(GetTickCount mod 100000) + ExtPart;
+    ARemoteSize := StrToInt64Def(SizeText, -1);
+    Result := ARemoteSize >= 0;
   end;
 
 begin
@@ -1611,10 +1688,20 @@ begin
       ASdPath + ' (' + IntToStr(Stream.Size) + ' bytes)';
     StatusBar1.Update;
 
-    if RemoteFileSizeMatches(Stream.Size) then
+    if RemoteFileExists(RemoteSize) then
     begin
-      StatusBar1.SimpleText := 'SD upload overwrite: ' + ASdPath;
-      StatusBar1.Update;
+      if CheckBox4.Enabled and CheckBox4.Checked then
+      begin
+        StatusBar1.SimpleText := 'SD upload overwrite: ' + ASdPath;
+        StatusBar1.Update;
+      end
+      else
+      begin
+        StatusBar1.SimpleText := 'SD upload skipped, exists: ' + ASdPath;
+        StatusBar1.Update;
+        Result := True;
+        Exit;
+      end;
     end;
 
     if not SendUploadLine('FW|' + ASdPath + '|' + IntToStr(Stream.Size), 'OK|FW|', 3000) then
@@ -1670,6 +1757,8 @@ begin
   end;
 end;
 
+//======================================================
+// Загружает файл JPG для выбранной строки, если это требуется.
 function TForm1.UploadImageRowToEsp(ARow: Integer): Boolean;
 var
   Cmd: string;
@@ -1693,10 +1782,13 @@ begin
   if Result and (Trim(StringGrid1.Cells[COL_TEXT, ARow]) <> SdPath) then
   begin
     StringGrid1.Cells[COL_TEXT, ARow] := SdPath;
+    Edit1.Text := ScriptFromRow(ARow);
     RepaintPreview;
   end;
 end;
 
+//======================================================
+// Возвращает прямоугольник элемента строки на виртуальном дисплее.
 function TForm1.RowRect(ARow: Integer; var ARect: TRect): Boolean;
 var
   Cmd: string;
@@ -1743,6 +1835,8 @@ begin
   Result := True;
 end;
 
+//======================================================
+// Добавляет новый элемент интерфейса в таблицу команд.
 procedure TForm1.AddElement(const AKind: string);
 var
   R: Integer;
@@ -1772,7 +1866,10 @@ begin
 
   if AKind = 'BT' then
   begin
-    StringGrid1.Cells[COL_TEXT, R] := 'Button';
+    if Trim(Edit4.Text) <> '' then
+      StringGrid1.Cells[COL_TEXT, R] := Edit4.Text
+    else
+      StringGrid1.Cells[COL_TEXT, R] := 'Button';
     StringGrid1.Cells[COL_C1, R] := FDefaultBgRgb;
     StringGrid1.Cells[COL_C2, R] := FDefaultLineRgb;
     StringGrid1.Cells[COL_EXTRA, R] := FDefaultFgRgb;
@@ -1780,7 +1877,10 @@ begin
   end
   else if AKind = 'TX' then
   begin
-    StringGrid1.Cells[COL_TEXT, R] := 'Text';
+    if Trim(Edit4.Text) <> '' then
+      StringGrid1.Cells[COL_TEXT, R] := Edit4.Text
+    else
+      StringGrid1.Cells[COL_TEXT, R] := 'Text';
     StringGrid1.Cells[COL_W, R] := '100';
     StringGrid1.Cells[COL_H, R] := '30';
     StringGrid1.Cells[COL_C1, R] := FDefaultFgRgb;
@@ -1810,9 +1910,9 @@ begin
     StringGrid1.Cells[COL_TEXT, R] := '0';
     StringGrid1.Cells[COL_W, R] := '120';
     StringGrid1.Cells[COL_H, R] := '52';
-    StringGrid1.Cells[COL_C1, R] := FDefaultFgRgb;
+    StringGrid1.Cells[COL_C1, R] := FDefaultLineRgb;
     StringGrid1.Cells[COL_C2, R] := FDefaultBgRgb;
-    StringGrid1.Cells[COL_EXTRA, R] := FDefaultLineRgb;
+    StringGrid1.Cells[COL_EXTRA, R] := '';
   end
   else if AKind = 'BM' then
   begin
@@ -1832,6 +1932,16 @@ begin
     StringGrid1.Cells[COL_SRCW, R] := '0';
     StringGrid1.Cells[COL_SRCH, R] := '0';
     UpdateImageRowSize(R);
+  end
+  else if AKind = 'BX' then
+  begin
+    StringGrid1.Cells[COL_TEXT, R] := '';
+    StringGrid1.Cells[COL_W, R] := '120';
+    StringGrid1.Cells[COL_H, R] := '60';
+    StringGrid1.Cells[COL_C1, R] := FDefaultBgRgb;
+    StringGrid1.Cells[COL_C2, R] := FDefaultLineRgb;
+    StringGrid1.Cells[COL_EXTRA, R] := '0';
+    StringGrid1.Cells[COL_LINE, R] := '1';
   end
   else if AKind = 'RR' then
   begin
@@ -1855,6 +1965,8 @@ begin
   SelectRow(R);
 end;
 
+//======================================================
+// Разбирает строку скрипта и добавляет её в таблицу редактора.
 procedure TForm1.AddScriptLine(const ALine: string);
 var
   Parts: TStringList;
@@ -1880,6 +1992,9 @@ begin
       Exit;
     Cmd := UpperCase(Trim(Part(0)));
     if Cmd = '' then
+      Exit;
+    if (Cmd = 'C') or (Cmd = 'L') or (Cmd = 'I') or (Cmd = 'B') or
+      (Cmd = 'W') or (Cmd = 'S') or (Cmd = 'T') then
       Exit;
 
     if (StringGrid1.RowCount = 2) and (Trim(StringGrid1.Cells[COL_CMD, 1]) = '') then
@@ -1935,11 +2050,14 @@ begin
       StringGrid1.Cells[COL_C1, R] := Part(8, '0xFFFF');
       StringGrid1.Cells[COL_C2, R] := Part(9, '0x07E0');
     end
-    else if Cmd = 'RR' then
+    else if (Cmd = 'BX') or (Cmd = 'RR') then
     begin
       StringGrid1.Cells[COL_C1, R] := Part(6, '0x0001');
       StringGrid1.Cells[COL_C2, R] := Part(7, '0xFFFF');
-      StringGrid1.Cells[COL_EXTRA, R] := Part(8, '8');
+      if Cmd = 'BX' then
+        StringGrid1.Cells[COL_EXTRA, R] := Part(8, '0')
+      else
+        StringGrid1.Cells[COL_EXTRA, R] := Part(8, '8');
       StringGrid1.Cells[COL_LINE, R] := Part(9, '1');
     end
     else if Cmd = 'TW' then
@@ -1954,6 +2072,13 @@ begin
       StringGrid1.Cells[COL_EXTRA, R] := Part(8, '100');
       StringGrid1.Cells[COL_C1, R] := Part(9, '0xFFFF');
       StringGrid1.Cells[COL_C2, R] := Part(10, '0x07E0');
+    end
+    else if Cmd = 'SW' then
+    begin
+      StringGrid1.Cells[COL_TEXT, R] := Part(6, '0');
+      StringGrid1.Cells[COL_C1, R] := Part(7, '0x8410');
+      StringGrid1.Cells[COL_C2, R] := Part(8, '0x07E0');
+      StringGrid1.Cells[COL_EXTRA, R] := '';
     end
     else if Cmd = 'CC' then
     begin
@@ -1994,6 +2119,8 @@ begin
   end;
 end;
 
+//======================================================
+// Дублирует текущую выбранную строку элемента.
 procedure TForm1.DuplicateSelectedRow;
 var
   R: Integer;
@@ -2013,6 +2140,8 @@ begin
   SelectRow(R);
 end;
 
+//======================================================
+// Переносит значения полей редактора обратно в текущую строку таблицы.
 procedure TForm1.UpdateRowFromInputs(ARow: Integer);
 var
   Cmd: string;
@@ -2033,6 +2162,8 @@ begin
     StringGrid1.Cells[COL_H, ARow] := IntToStr(SpinEdit4.Value);
     if Cmd = 'CC' then
       StringGrid1.Cells[COL_H, ARow] := StringGrid1.Cells[COL_W, ARow];
+    if (Cmd = 'BT') or (Cmd = 'TX') then
+      StringGrid1.Cells[COL_TEXT, ARow] := Edit4.Text;
     if (Cmd = 'TR') or (Cmd = 'PB') or (Cmd = 'SW') or (Cmd = 'SB') then
       StringGrid1.Cells[COL_TEXT, ARow] := IntToStr(SpinEdit6.Value);
     if Cmd = 'RR' then
@@ -2042,6 +2173,85 @@ begin
   RepaintPreview;
 end;
 
+//======================================================
+// Включает или отключает элемент управления, если он существует.
+procedure SetControlState(AControl: TControl; AEnabled: Boolean);
+begin
+  if Assigned(AControl) then
+    AControl.Enabled := AEnabled;
+end;
+
+//======================================================
+// Настраивает доступность полей редактора под выбранный тип элемента.
+procedure TForm1.UpdateEditorControlStates;
+var
+  Cmd: string;
+  HasRow: Boolean;
+  HasPosition: Boolean;
+  HasWidth: Boolean;
+  HasHeight: Boolean;
+  HasRound: Boolean;
+  HasValue: Boolean;
+  HasLine: Boolean;
+  HasFont: Boolean;
+  HasAlign: Boolean;
+  HasPicture: Boolean;
+  HasText: Boolean;
+begin
+  HasRow := (FSelectedRow >= 1) and (FSelectedRow < StringGrid1.RowCount) and
+    (Trim(StringGrid1.Cells[COL_CMD, FSelectedRow]) <> '');
+  Cmd := '';
+  if HasRow then
+    Cmd := UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow]));
+
+  HasPosition := HasRow and (Cmd <> 'CL');
+  HasWidth := HasRow and (Cmd <> 'CL') and (Cmd <> 'BM');
+  HasHeight := HasWidth and (Cmd <> 'CC');
+  HasRound := HasRow and (Cmd = 'RR');
+  HasValue := HasRow and ((Cmd = 'TR') or (Cmd = 'PB') or (Cmd = 'SW') or (Cmd = 'SB'));
+  HasLine := HasRow and ((Cmd = 'BT') or (Cmd = 'BX') or (Cmd = 'RR') or (Cmd = 'CC'));
+  HasFont := HasRow and ((Cmd = 'TX') or (Cmd = 'BT'));
+  HasAlign := HasFont;
+  HasPicture := HasRow and (Cmd = 'JPG');
+  HasText := HasRow and ((Cmd = 'BT') or (Cmd = 'TX'));
+
+  SetControlState(Label3, HasPosition or HasWidth);
+  SetControlState(Label1, HasPosition);
+  SetControlState(Label4, HasPosition);
+  SetControlState(SpinEdit1, HasPosition);
+  SetControlState(SpinEdit2, HasPosition);
+
+  SetControlState(Label5, HasWidth);
+  SetControlState(Label6, HasWidth);
+  SetControlState(Label7, HasHeight);
+  SetControlState(SpinEdit3, HasWidth);
+  SetControlState(SpinEdit4, HasHeight);
+
+  SetControlState(Label14, HasRound);
+  SetControlState(SpinEdit5, HasRound);
+
+  SetControlState(Label16, HasValue);
+  SetControlState(SpinEdit6, HasValue);
+
+  SetControlState(Label23, HasLine);
+  SetControlState(FLineTrackLabel, HasLine);
+  SetControlState(FLineTrack, HasLine);
+
+  SetControlState(Label24, HasFont);
+  SetControlState(FFontListLabel, HasFont);
+  SetControlState(FFontList, HasFont);
+  SetControlState(Button9, HasFont);
+  SetControlState(ComboBox2, HasAlign);
+  SetControlState(ComboBox3, HasAlign);
+  SetControlState(Edit4, HasText);
+
+  SetControlState(Button3, True);
+  SetControlState(Button13, True);
+  SetControlState(CheckBox4, HasPicture);
+end;
+
+//======================================================
+// Загружает параметры выбранной строки в элементы управления формы.
 procedure TForm1.LoadInputsFromRow(ARow: Integer);
 var
   FontId: Integer;
@@ -2066,11 +2276,13 @@ begin
     if Radius > 80 then
       Radius := 80;
     SpinEdit5.Value := Radius;
+    if (Cmd = 'BT') or (Cmd = 'TX') then
+      Edit4.Text := StringGrid1.Cells[COL_TEXT, ARow]
+    else
+      Edit4.Text := '';
     SpinEdit6.Value := StrToIntDef(StringGrid1.Cells[COL_TEXT, ARow], 0);
     if Assigned(FLineTrack) then
       FLineTrack.Position := StrToIntDef(StringGrid1.Cells[COL_LINE, ARow], 1);
-    if Assigned(TrackBar2) then
-      TrackBar2.Position := Radius;
     if Assigned(FFontList) then
     begin
       FontId := StrToIntDef(StringGrid1.Cells[COL_FONT, ARow], 2);
@@ -2082,11 +2294,99 @@ begin
     end;
     SetAlignButtons(StringGrid1.Cells[COL_HALIGN, ARow], StringGrid1.Cells[COL_VALIGN, ARow]);
     Edit1.Text := ScriptFromRow(ARow);
+    UpdateEditorControlStates;
   finally
     FLoadingInputs := False;
   end;
 end;
 
+//======================================================
+// Синхронизирует четыре цветовых поля с цветами выбранного элемента.
+procedure TForm1.UpdateDefaultColorsFromRow(ARow: Integer);
+var
+  Cmd: string;
+  C1: string;
+  C2: string;
+  Extra: string;
+
+  procedure SetLine(const AValue: string);
+  begin
+    if Trim(AValue) <> '' then
+      FDefaultLineRgb := AValue;
+  end;
+
+  procedure SetText(const AValue: string);
+  begin
+    if Trim(AValue) <> '' then
+      FDefaultFgRgb := AValue;
+  end;
+
+  procedure SetFill(const AValue: string);
+  begin
+    if Trim(AValue) <> '' then
+      FDefaultBgRgb := AValue;
+  end;
+
+  procedure SetScreen(const AValue: string);
+  begin
+    if Trim(AValue) <> '' then
+    begin
+      FDefaultLcdBgRgb := AValue;
+      if IsNoColorRgb(AValue) then
+        FLcdBgColor := clBlack
+      else
+        FLcdBgColor := Rgb565ToColor(AValue, FLcdBgColor);
+    end;
+  end;
+
+begin
+  if (ARow < 1) or (ARow >= StringGrid1.RowCount) then
+    Exit;
+
+  Cmd := UpperCase(Trim(StringGrid1.Cells[COL_CMD, ARow]));
+  C1 := Trim(StringGrid1.Cells[COL_C1, ARow]);
+  C2 := Trim(StringGrid1.Cells[COL_C2, ARow]);
+  Extra := Trim(StringGrid1.Cells[COL_EXTRA, ARow]);
+
+  if Cmd = 'CL' then
+    SetScreen(C1)
+  else if Cmd = 'BT' then
+  begin
+    SetFill(C1);
+    SetLine(C2);
+    SetText(Extra);
+  end
+  else if Cmd = 'TX' then
+  begin
+    SetText(C1);
+    SetFill(C2);
+  end
+  else if (Cmd = 'BX') or (Cmd = 'RR') or (Cmd = 'CC') or (Cmd = 'TW') then
+  begin
+    SetFill(C1);
+    SetLine(C2);
+  end
+  else if (Cmd = 'TR') or (Cmd = 'SB') or (Cmd = 'SW') then
+  begin
+    SetLine(C1);
+    SetFill(C2);
+  end
+  else if Cmd = 'PB' then
+  begin
+    SetFill(C1);
+    SetLine(Extra);
+  end
+  else if Cmd = 'BM' then
+  begin
+    SetText(C1);
+    SetFill(C2);
+  end;
+
+  RefreshColorFieldShapes;
+end;
+
+//======================================================
+// Выбирает строку таблицы и обновляет предпросмотр и панели свойств.
 procedure TForm1.SelectRow(ARow: Integer);
 begin
   if FSelectingRow then
@@ -2100,6 +2400,7 @@ begin
     FSelectedRow := ARow;
     StringGrid1.Row := ARow;
     LoadInputsFromRow(ARow);
+    UpdateDefaultColorsFromRow(ARow);
     StringGrid1.Invalidate;
     RepaintPreview;
   finally
@@ -2107,6 +2408,8 @@ begin
   end;
 end;
 
+//======================================================
+// Удаляет выбранную строку и выбирает ближайший оставшийся элемент.
 procedure TForm1.DeleteSelectedRow;
 var
   R: Integer;
@@ -2126,18 +2429,24 @@ begin
   SelectRow(NextRow);
 end;
 
+//======================================================
+// Запрашивает перерисовку виртуального дисплея.
 procedure TForm1.RepaintPreview;
 begin
   if Assigned(FPreview) then
     FPreview.Invalidate;
 end;
 
+//======================================================
+// Переводит координаты мыши предпросмотра в координаты LCD 480x320.
 function TForm1.DisplayPoint(AX, AY: Integer): TPoint;
 begin
   Result.X := Round(AX * 480 / FPreview.Width);
   Result.Y := Round(AY * 320 / FPreview.Height);
 end;
 
+//======================================================
+// Определяет строку элемента под курсором на виртуальном дисплее.
 function TForm1.HitRow(AX, AY: Integer; var AResize: Boolean): Integer;
 var
   R: Integer;
@@ -2156,6 +2465,8 @@ begin
     end;
 end;
 
+//======================================================
+// Записывает изменённые координаты и размер элемента в строку таблицы.
 procedure TForm1.SetRowRect(ARow: Integer; const ARect: TRect);
 var
   W: Integer;
@@ -2182,27 +2493,70 @@ begin
   RepaintPreview;
 end;
 
+//======================================================
+// Возвращает полный путь к файлу скрипта рядом с программой.
 function TForm1.ScriptFilePath(const AFileName: string): string;
 begin
   Result := ExtractFilePath(ParamStr(0)) + AFileName;
 end;
 
+//======================================================
+// Возвращает полный путь к ini-файлу настроек редактора.
 function TForm1.ConfigFilePath: string;
 begin
   Result := ExtractFilePath(ParamStr(0)) + 'NXTGUIMaker.ini';
 end;
 
+//======================================================
+// Выбирает активное цветовое поле stroke/text/fill/screen.
 procedure TForm1.SetActiveColorField(AField: TColorField);
 begin
   FActiveColorField := AField;
   RefreshColorFieldShapes;
 end;
 
+//======================================================
+// Создаёт подписи No color поверх цветовых полей при необходимости.
+procedure TForm1.EnsureNoColorLabels;
+var
+  Field: TColorField;
+begin
+  for Field := Low(TColorField) to High(TColorField) do
+  begin
+    if not Assigned(FNoColorLabels[Field]) then
+    begin
+      FNoColorLabels[Field] := TLabel.Create(Self);
+      FNoColorLabels[Field].Parent := Self;
+      FNoColorLabels[Field].AutoSize := False;
+      FNoColorLabels[Field].Alignment := taCenter;
+      FNoColorLabels[Field].Layout := tlCenter;
+      FNoColorLabels[Field].Transparent := True;
+      FNoColorLabels[Field].Caption := 'No color';
+      FNoColorLabels[Field].Font.Color := clGray;
+      FNoColorLabels[Field].Font.Style := [fsBold];
+      FNoColorLabels[Field].OnMouseDown := ColorFieldMouseDown;
+      FNoColorLabels[Field].Visible := False;
+    end;
+  end;
+end;
+
+//======================================================
+// Перерисовывает четыре цветовых поля и фон виртуального LCD.
 procedure TForm1.RefreshColorFieldShapes;
 
   procedure SetupShape(AShape: TShape; AField: TColorField; const ARgb: string);
   begin
-    AShape.Brush.Color := Rgb565ToColor(ARgb, AShape.Brush.Color);
+    if IsNoColorRgb(ARgb) then
+    begin
+      AShape.Brush.Color := clGray;
+      AShape.Brush.Style := bsDiagCross;
+    end
+    else
+    begin
+      AShape.Brush.Style := bsSolid;
+      AShape.Brush.Color := Rgb565ToColor(ARgb, AShape.Brush.Color);
+    end;
+
     if FActiveColorField = AField then
     begin
       AShape.Pen.Color := clRed;
@@ -2210,61 +2564,98 @@ procedure TForm1.RefreshColorFieldShapes;
     end
     else
     begin
-      AShape.Pen.Color := clBlack;
+      if IsNoColorRgb(ARgb) then
+        AShape.Pen.Color := clGray
+      else
+        AShape.Pen.Color := clBlack;
       AShape.Pen.Width := 1;
+    end;
+
+    if Assigned(FNoColorLabels[AField]) then
+    begin
+      FNoColorLabels[AField].SetBounds(AShape.Left, AShape.Top, AShape.Width, AShape.Height);
+      FNoColorLabels[AField].Visible := IsNoColorRgb(ARgb);
+      if FNoColorLabels[AField].Visible then
+        FNoColorLabels[AField].BringToFront;
     end;
   end;
 
 begin
+  EnsureNoColorLabels;
   SetupShape(Shape6, cfLine, FDefaultLineRgb);
   SetupShape(Shape7, cfText, FDefaultFgRgb);
   SetupShape(Shape8, cfBack, FDefaultBgRgb);
   SetupShape(Shape9, cfLcdBack, FDefaultLcdBgRgb);
-  Shape1.Brush.Color := Rgb565ToColor(FDefaultLcdBgRgb, Shape1.Brush.Color);
-  Shape1.Pen.Color := Shape1.Brush.Color;
+  if IsNoColorRgb(FDefaultLcdBgRgb) then
+  begin
+    Shape1.Brush.Color := clBlack;
+    Shape1.Pen.Color := clBlack;
+  end
+  else
+  begin
+    Shape1.Brush.Color := Rgb565ToColor(FDefaultLcdBgRgb, Shape1.Brush.Color);
+    Shape1.Pen.Color := Shape1.Brush.Color;
+  end;
 end;
 
+//======================================================
+// Применяет выбранный цвет палитры к активному цветовому полю и строке.
 procedure TForm1.ApplyPaletteColorToActiveField(const ARgb: string; AColor: TColor);
 var
   Cmd: string;
+  HasRow: Boolean;
 begin
-  if (FActiveColorField <> cfLcdBack) and
-    ((FSelectedRow < 1) or (FSelectedRow >= StringGrid1.RowCount)) then
-    Exit;
-
   Cmd := '';
-  if (FSelectedRow >= 1) and (FSelectedRow < StringGrid1.RowCount) then
+  HasRow := (FSelectedRow >= 1) and (FSelectedRow < StringGrid1.RowCount);
+  if HasRow then
     Cmd := UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow]));
 
   case FActiveColorField of
     cfLine:
       begin
         FDefaultLineRgb := ARgb;
-        if Cmd = 'PB' then
-          StringGrid1.Cells[COL_EXTRA, FSelectedRow] := ARgb
-        else
-          StringGrid1.Cells[COL_C2, FSelectedRow] := ARgb;
+        if HasRow then
+        begin
+          if Cmd = 'PB' then
+            StringGrid1.Cells[COL_EXTRA, FSelectedRow] := ARgb
+          else if (Cmd = 'TR') or (Cmd = 'SB') or (Cmd = 'SW') then
+            StringGrid1.Cells[COL_C1, FSelectedRow] := ARgb
+          else
+            StringGrid1.Cells[COL_C2, FSelectedRow] := ARgb;
+        end;
       end;
     cfText:
       begin
         FDefaultFgRgb := ARgb;
-        if Cmd = 'BT' then
-          StringGrid1.Cells[COL_EXTRA, FSelectedRow] := ARgb
-        else
-          StringGrid1.Cells[COL_C1, FSelectedRow] := ARgb;
+        if HasRow then
+        begin
+          if Cmd = 'BT' then
+            StringGrid1.Cells[COL_EXTRA, FSelectedRow] := ARgb
+          else
+            StringGrid1.Cells[COL_C1, FSelectedRow] := ARgb;
+        end;
       end;
     cfBack:
       begin
         FDefaultBgRgb := ARgb;
-        if Cmd = 'TX' then
-          StringGrid1.Cells[COL_C2, FSelectedRow] := ARgb
-        else
-          StringGrid1.Cells[COL_C1, FSelectedRow] := ARgb;
+        if HasRow then
+        begin
+          if (Cmd = 'TX') or (Cmd = 'BM') or (Cmd = 'TR') or
+            (Cmd = 'SB') or (Cmd = 'SW') then
+            StringGrid1.Cells[COL_C2, FSelectedRow] := ARgb
+          else
+            StringGrid1.Cells[COL_C1, FSelectedRow] := ARgb;
+        end;
       end;
     cfLcdBack:
       begin
         FDefaultLcdBgRgb := ARgb;
-        FLcdBgColor := AColor;
+        if IsNoColorRgb(ARgb) then
+          FLcdBgColor := clBlack
+        else
+          FLcdBgColor := AColor;
+        if HasRow and (Cmd = 'CL') then
+          StringGrid1.Cells[COL_C1, FSelectedRow] := ARgb;
       end;
   end;
 
@@ -2280,20 +2671,48 @@ begin
   SaveSettings;
 end;
 
+//======================================================
+// Обрабатывает выбор цветового поля и назначение No color правой кнопкой.
 procedure TForm1.ColorFieldMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+var
+  Field: TColorField;
+  Found: Boolean;
 begin
-  if Button <> mbLeft then
-    Exit;
+  Field := cfText;
+  Found := True;
   if Sender = Shape6 then
-    SetActiveColorField(cfLine)
+    Field := cfLine
   else if Sender = Shape7 then
-    SetActiveColorField(cfText)
+    Field := cfText
   else if Sender = Shape8 then
-    SetActiveColorField(cfBack)
+    Field := cfBack
   else if Sender = Shape9 then
-    SetActiveColorField(cfLcdBack);
+    Field := cfLcdBack
+  else if Sender = FNoColorLabels[cfLine] then
+    Field := cfLine
+  else if Sender = FNoColorLabels[cfText] then
+    Field := cfText
+  else if Sender = FNoColorLabels[cfBack] then
+    Field := cfBack
+  else if Sender = FNoColorLabels[cfLcdBack] then
+    Field := cfLcdBack
+  else
+    Found := False;
+
+  if not Found then
+    Exit;
+
+  if Button = mbLeft then
+    SetActiveColorField(Field)
+  else if Button = mbRight then
+  begin
+    SetActiveColorField(Field);
+    ApplyPaletteColorToActiveField('0x0001', clBtnFace);
+  end;
 end;
 
+//======================================================
+// Загружает сохранённые настройки редактора из ini-файла.
 procedure TForm1.LoadSettings;
 var
   Ini: TIniFile;
@@ -2324,7 +2743,10 @@ begin
     LcdBgRgb := Ini.ReadString('Colors', 'Screen',
       Ini.ReadString('Colors', 'LcdBackground', Rgb565Text(Shape1.Brush.Color)));
     FDefaultLcdBgRgb := LcdBgRgb;
-    Shape1.Brush.Color := Rgb565ToColor(LcdBgRgb, Shape1.Brush.Color);
+    if IsNoColorRgb(LcdBgRgb) then
+      Shape1.Brush.Color := clBlack
+    else
+      Shape1.Brush.Color := Rgb565ToColor(LcdBgRgb, Shape1.Brush.Color);
     Shape1.Pen.Color := Shape1.Brush.Color;
     FLcdBgColor := Shape1.Brush.Color;
     if (StringGrid1.RowCount > 1) and (Trim(StringGrid1.Cells[COL_CMD, 1]) = '') then
@@ -2339,6 +2761,8 @@ begin
   end;
 end;
 
+//======================================================
+// Сохраняет текущие настройки редактора в ini-файл.
 procedure TForm1.SaveSettings;
 var
   Ini: TIniFile;
@@ -2361,16 +2785,63 @@ begin
   end;
 end;
 
+//======================================================
+// Проверяет, включена ли отправка команд через serial.
 function TForm1.SerialEnabled: Boolean;
 begin
   Result := CheckBox2.Checked;
 end;
 
+//======================================================
+// Проверяет, включена ли отправка команд через UDP.
 function TForm1.UdpEnabled: Boolean;
 begin
   Result := CheckBox3.Checked;
 end;
 
+//======================================================
+// Создаёт и настраивает UDP-сокет для команд и событий ESP.
+function TForm1.EnsureUdpSocket(ABroadcast: Boolean): Boolean;
+var
+  Opt: Integer;
+  NonBlocking: u_long;
+begin
+  Result := FUdpSocket <> INVALID_SOCKET;
+  if not Result then
+  begin
+    FUdpSocket := socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if FUdpSocket = INVALID_SOCKET then
+    begin
+      SetUdpStateColor(clGray);
+      StatusBar1.SimpleText := 'UDP socket error';
+      Exit;
+    end;
+
+    NonBlocking := 1;
+    ioctlsocket(FUdpSocket, FIONBIO, NonBlocking);
+    Result := True;
+  end;
+
+  if ABroadcast then
+  begin
+    Opt := 1;
+    setsockopt(FUdpSocket, SOL_SOCKET, SO_BROADCAST, PAnsiChar(@Opt), SizeOf(Opt));
+  end;
+end;
+
+//======================================================
+// Закрывает UDP-сокет редактора.
+procedure TForm1.CloseUdpSocket;
+begin
+  if FUdpSocket <> INVALID_SOCKET then
+  begin
+    closesocket(FUdpSocket);
+    FUdpSocket := INVALID_SOCKET;
+  end;
+end;
+
+//======================================================
+// Сохраняет текущую таблицу команд в текстовый файл скрипта.
 procedure TForm1.SaveDesignToFile(const AFileName: string);
 var
   SL: TStringList;
@@ -2392,6 +2863,8 @@ begin
   end;
 end;
 
+//======================================================
+// Загружает скрипт из файла в таблицу команд.
 procedure TForm1.LoadDesignFromFile(const AFileName: string);
 var
   SL: TStringList;
@@ -2421,9 +2894,10 @@ begin
   end;
 end;
 
+//======================================================
+// Отправляет одну команду по UDP и ожидает ответ ESP.
 function TForm1.UdpExchangeLine(const ALine, AHost: string; ABroadcast: Boolean; var AReply: string): Boolean;
 var
-  Sock: TSocket;
   Addr: TSockAddrIn;
   FromAddr: TSockAddrIn;
   FromLen: Integer;
@@ -2431,10 +2905,9 @@ var
   Data: AnsiString;
   Buffer: array[0..511] of AnsiChar;
   Port: Integer;
-  Opt: Integer;
-  NonBlocking: u_long;
   ReadCount: Integer;
   StartedAt: DWORD;
+  ReceivedLine: string;
 begin
   Result := False;
   AReply := '';
@@ -2448,19 +2921,8 @@ begin
     Exit;
   end;
 
-  Sock := socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if Sock = INVALID_SOCKET then
-  begin
-    SetUdpStateColor(clGray);
-    StatusBar1.SimpleText := 'UDP socket error';
+  if not EnsureUdpSocket(ABroadcast) then
     Exit;
-  end;
-
-  if ABroadcast then
-  begin
-    Opt := 1;
-    setsockopt(Sock, SOL_SOCKET, SO_BROADCAST, PAnsiChar(@Opt), SizeOf(Opt));
-  end;
 
   FillChar(Addr, SizeOf(Addr), 0);
   Addr.sin_family := AF_INET;
@@ -2468,31 +2930,34 @@ begin
   Addr.sin_addr.S_addr := inet_addr(PAnsiChar(HostText));
   if Addr.sin_addr.S_addr = INADDR_NONE then
   begin
-    closesocket(Sock);
     SetUdpStateColor(clGray);
     StatusBar1.SimpleText := 'UDP IP error: ' + string(HostText);
     Exit;
   end;
 
   Data := AnsiString(ALine);
-  if sendto(Sock, PAnsiChar(Data)^, Length(Data), 0, Addr, SizeOf(Addr)) <> Length(Data) then
+  if sendto(FUdpSocket, PAnsiChar(Data)^, Length(Data), 0, Addr, SizeOf(Addr)) <> Length(Data) then
   begin
-    closesocket(Sock);
+    CloseUdpSocket;
     SetUdpStateColor(clGray);
     StatusBar1.SimpleText := 'UDP send error';
     Exit;
   end;
 
-  NonBlocking := 1;
-  ioctlsocket(Sock, FIONBIO, NonBlocking);
   StartedAt := GetTickCount;
   repeat
     FromLen := SizeOf(FromAddr);
-    ReadCount := recvfrom(Sock, Buffer, SizeOf(Buffer) - 1, 0, FromAddr, FromLen);
+    ReadCount := recvfrom(FUdpSocket, Buffer, SizeOf(Buffer) - 1, 0, FromAddr, FromLen);
     if ReadCount > 0 then
     begin
       Buffer[ReadCount] := #0;
-      AReply := string(Buffer);
+      ReceivedLine := Trim(string(Buffer));
+      if Pos('EV|', UpperCase(ReceivedLine)) = 1 then
+      begin
+        HandleRxLine(ReceivedLine);
+        Continue;
+      end;
+      AReply := ReceivedLine;
       Result := True;
       Break;
     end;
@@ -2500,7 +2965,6 @@ begin
     Sleep(10);
   until GetTickCount - StartedAt > 3000;
 
-  closesocket(Sock);
   if Result then
     SetUdpStateColor(clLime)
   else
@@ -2511,6 +2975,34 @@ begin
   end;
 end;
 
+//======================================================
+// Считывает асинхронные UDP-события от ESP.
+procedure TForm1.PollUdpInput;
+var
+  FromAddr: TSockAddrIn;
+  FromLen: Integer;
+  Buffer: array[0..511] of AnsiChar;
+  ReadCount: Integer;
+  Line: string;
+begin
+  if (not UdpEnabled) or (FUdpSocket = INVALID_SOCKET) then
+    Exit;
+
+  repeat
+    FromLen := SizeOf(FromAddr);
+    ReadCount := recvfrom(FUdpSocket, Buffer, SizeOf(Buffer) - 1, 0, FromAddr, FromLen);
+    if ReadCount > 0 then
+    begin
+      Buffer[ReadCount] := #0;
+      Line := Trim(string(Buffer));
+      if Line <> '' then
+        HandleRxLine(Line);
+    end;
+  until ReadCount <= 0;
+end;
+
+//======================================================
+// Отправляет строку команды по UDP.
 function TForm1.SendUdpLine(const ALine: string): Boolean;
 var
   Reply: string;
@@ -2523,6 +3015,8 @@ begin
     StatusBar1.SimpleText := 'UDP RX: ' + Trim(Reply);
 end;
 
+//======================================================
+// Отправляет строку команды по serial-порту.
 procedure TForm1.SendSerialLine(const ALine: string);
 var
   Data: AnsiString;
@@ -2550,6 +3044,8 @@ begin
   end;
 end;
 
+//======================================================
+// Отправляет команду через выбранные каналы связи.
 procedure TForm1.SendLine(const ALine: string);
 var
   Sent: Boolean;
@@ -2576,16 +3072,22 @@ begin
     StatusBar1.SimpleText := 'No active output channel';
 end;
 
+//======================================================
+// Изменяет цвет индикатора состояния COM-порта.
 procedure TForm1.SetPortStateColor(AColor: TColor);
 begin
   Shape4.Brush.Color := AColor;
 end;
 
+//======================================================
+// Изменяет цвет индикатора состояния UDP-соединения.
 procedure TForm1.SetUdpStateColor(AColor: TColor);
 begin
   Shape5.Brush.Color := AColor;
 end;
 
+//======================================================
+// Проверяет, доступен ли открытый COM-порт.
 function TForm1.PortAlive: Boolean;
 var
   Errors: DWORD;
@@ -2599,6 +3101,8 @@ begin
   Result := ClearCommError(FPort, Errors, @Stat);
 end;
 
+//======================================================
+// Считывает накопленные строки ответа из serial-порта.
 procedure TForm1.PollPortInput;
 var
   Buffer: array[0..127] of AnsiChar;
@@ -2641,9 +3145,16 @@ begin
   until ReadCount = 0;
 end;
 
+//======================================================
+// Обрабатывает входящую строку от ESP и обновляет состояние D7.
 procedure TForm1.HandleRxLine(const ALine: string);
 var
   Parts: TStringList;
+  Kind: string;
+  EventName: string;
+  IdText: string;
+  ValueText: string;
+  R: Integer;
 begin
   StatusBar1.SimpleText := 'RX: ' + ALine;
   Parts := TStringList.Create;
@@ -2657,11 +3168,44 @@ begin
       SaveSettings;
       StatusBar1.SimpleText := 'ESP IP: ' + Edit2.Text;
     end;
+    if (Parts.Count >= 4) and (UpperCase(Parts[0]) = 'EV') then
+    begin
+      Kind := UpperCase(Parts[1]);
+      IdText := Parts[2];
+      EventName := UpperCase(Parts[3]);
+      if ((Kind = 'TR') or (Kind = 'SW')) and (Parts.Count >= 7) then
+      begin
+        ValueText := Parts[4];
+        StatusBar1.SimpleText := 'Touch ' + Kind + ' #' + IdText + ' ' +
+          EventName + ' = ' + ValueText;
+        if EventName = 'CHANGE' then
+        begin
+          for R := 1 to StringGrid1.RowCount - 1 do
+          begin
+            if (UpperCase(Trim(StringGrid1.Cells[COL_CMD, R])) = Kind) and
+              (Trim(StringGrid1.Cells[COL_ID, R]) = IdText) then
+            begin
+              StringGrid1.Cells[COL_TEXT, R] := ValueText;
+              if R = FSelectedRow then
+                LoadInputsFromRow(R)
+              else
+                Edit1.Text := ScriptFromRow(FSelectedRow);
+              RepaintPreview;
+              Break;
+            end;
+          end;
+        end;
+      end
+      else if (Kind = 'BT') and (Parts.Count >= 6) then
+        StatusBar1.SimpleText := 'Touch BT #' + IdText + ' ' + EventName;
+    end;
   finally
     Parts.Free;
   end;
 end;
 
+//======================================================
+// Устанавливает или снимает RTS на открытом COM-порту.
 procedure TForm1.ApplyRts;
 begin
   if FPort = INVALID_HANDLE_VALUE then
@@ -2689,6 +3233,8 @@ begin
   end;
 end;
 
+//======================================================
+// Открывает или закрывает выбранный COM-порт.
 procedure TForm1.OpenClosePort;
 var
   Dcb: TDCB;
@@ -2742,10 +3288,12 @@ begin
   StatusBar1.SimpleText := 'Opened ' + ComboBox1.Text + ', 115200 baud';
 end;
 
+//======================================================
+// Закрывает COM-порт и обновляет состояние интерфейса.
 procedure TForm1.ClosePort(AErrorState: Boolean = False);
 begin
   if Assigned(FPortMonitor) then
-    FPortMonitor.Enabled := False;
+    FPortMonitor.Enabled := UdpEnabled;
   if FPort <> INVALID_HANDLE_VALUE then
   begin
     CloseHandle(FPort);
@@ -2763,6 +3311,8 @@ begin
   end;
 end;
 
+//======================================================
+// Рисует виртуальный LCD и все элементы текущего скрипта.
 procedure TForm1.PreviewPaint(Sender: TObject);
 var
   R: Integer;
@@ -2874,13 +3424,14 @@ begin
     begin
       ApplyPreviewFont(StrToIntDef(StringGrid1.Cells[COL_FONT, R], 2));
       FPreview.Canvas.Font.Color := C1;
-      if StringGrid1.Cells[COL_C2, R] <> '0x0001' then
+      if not IsNoColorRgb(StringGrid1.Cells[COL_C2, R]) then
       begin
         FPreview.Canvas.Brush.Color := C2;
         FPreview.Canvas.FillRect(DrawRc);
       end;
-      DrawAlignedPreviewText(StringGrid1.Cells[COL_TEXT, R], DrawRc,
-        StringGrid1.Cells[COL_HALIGN, R], StringGrid1.Cells[COL_VALIGN, R]);
+      if not IsNoColorRgb(StringGrid1.Cells[COL_C1, R]) then
+        DrawAlignedPreviewText(StringGrid1.Cells[COL_TEXT, R], DrawRc,
+          StringGrid1.Cells[COL_HALIGN, R], StringGrid1.Cells[COL_VALIGN, R]);
     end
     else if Cmd = 'BT' then
     begin
@@ -2889,20 +3440,41 @@ begin
         LineWidth := 1;
       if LineWidth > 4 then
         LineWidth := 4;
-      FPreview.Canvas.Brush.Color := C1;
-      FPreview.Canvas.Pen.Color := C2;
+      if IsNoColorRgb(StringGrid1.Cells[COL_C1, R]) then
+        FPreview.Canvas.Brush.Style := bsClear
+      else
+      begin
+        FPreview.Canvas.Brush.Style := bsSolid;
+        FPreview.Canvas.Brush.Color := C1;
+      end;
+      if IsNoColorRgb(StringGrid1.Cells[COL_C2, R]) then
+        FPreview.Canvas.Pen.Style := psClear
+      else
+      begin
+        FPreview.Canvas.Pen.Style := psSolid;
+        FPreview.Canvas.Pen.Color := C2;
+      end;
       FPreview.Canvas.Pen.Width := LineWidth;
       FPreview.Canvas.RoundRect(DrawRc.Left, DrawRc.Top, DrawRc.Right, DrawRc.Bottom, 10, 10);
       FPreview.Canvas.Pen.Width := 1;
+      FPreview.Canvas.Pen.Style := psSolid;
+      FPreview.Canvas.Brush.Style := bsSolid;
       ApplyPreviewFont(StrToIntDef(StringGrid1.Cells[COL_FONT, R], 2));
       FPreview.Canvas.Font.Color := Rgb565ToColor(StringGrid1.Cells[COL_EXTRA, R], clWhite);
-      DrawAlignedPreviewText(StringGrid1.Cells[COL_TEXT, R], DrawRc,
-        StringGrid1.Cells[COL_HALIGN, R], StringGrid1.Cells[COL_VALIGN, R]);
+      if not IsNoColorRgb(StringGrid1.Cells[COL_EXTRA, R]) then
+        DrawAlignedPreviewText(StringGrid1.Cells[COL_TEXT, R], DrawRc,
+          StringGrid1.Cells[COL_HALIGN, R], StringGrid1.Cells[COL_VALIGN, R]);
     end
     else if Cmd = 'TW' then
     begin
-      FPreview.Canvas.Pen.Color := C2;
-      if UpperCase(Trim(StringGrid1.Cells[COL_C1, R])) = '0X0001' then
+      if IsNoColorRgb(StringGrid1.Cells[COL_C2, R]) then
+        FPreview.Canvas.Pen.Style := psClear
+      else
+      begin
+        FPreview.Canvas.Pen.Style := psSolid;
+        FPreview.Canvas.Pen.Color := C2;
+      end;
+      if IsNoColorRgb(StringGrid1.Cells[COL_C1, R]) then
         FPreview.Canvas.Brush.Style := bsClear
       else
       begin
@@ -2910,32 +3482,49 @@ begin
         FPreview.Canvas.Brush.Color := C1;
       end;
       FPreview.Canvas.Rectangle(DrawRc);
+      FPreview.Canvas.Pen.Style := psSolid;
       FPreview.Canvas.Brush.Style := bsSolid;
       FPreview.Canvas.Font.Color := clWhite;
-      FPreview.Canvas.TextOut(DrawRc.Left + 6, DrawRc.Top + 6, StringGrid1.Cells[COL_TEXT, R]);
+      if not IsNoColorRgb(StringGrid1.Cells[COL_C2, R]) then
+        FPreview.Canvas.TextOut(DrawRc.Left + 6, DrawRc.Top + 6, StringGrid1.Cells[COL_TEXT, R]);
     end
-    else if Cmd = 'RR' then
+    else if (Cmd = 'BX') or (Cmd = 'RR') then
     begin
       LineWidth := StrToIntDef(StringGrid1.Cells[COL_LINE, R], 1);
       if LineWidth < 1 then
         LineWidth := 1;
       if LineWidth > 4 then
         LineWidth := 4;
-      Radius := StrToIntDef(StringGrid1.Cells[COL_EXTRA, R], 0);
-      if Radius < 0 then
+      if Cmd = 'RR' then
+      begin
+        Radius := StrToIntDef(StringGrid1.Cells[COL_EXTRA, R], 0);
+        if Radius < 0 then
+          Radius := 0;
+      end
+      else
         Radius := 0;
-      FPreview.Canvas.Pen.Color := C2;
+      if IsNoColorRgb(StringGrid1.Cells[COL_C2, R]) then
+        FPreview.Canvas.Pen.Style := psClear
+      else
+      begin
+        FPreview.Canvas.Pen.Style := psSolid;
+        FPreview.Canvas.Pen.Color := C2;
+      end;
       FPreview.Canvas.Pen.Width := LineWidth;
-      if UpperCase(Trim(StringGrid1.Cells[COL_C1, R])) = '0X0001' then
+      if IsNoColorRgb(StringGrid1.Cells[COL_C1, R]) then
         FPreview.Canvas.Brush.Style := bsClear
       else
       begin
         FPreview.Canvas.Brush.Style := bsSolid;
         FPreview.Canvas.Brush.Color := C1;
       end;
-      FPreview.Canvas.RoundRect(DrawRc.Left, DrawRc.Top, DrawRc.Right, DrawRc.Bottom,
-        Radius * 2, Radius * 2);
+      if Radius > 0 then
+        FPreview.Canvas.RoundRect(DrawRc.Left, DrawRc.Top, DrawRc.Right, DrawRc.Bottom,
+          Radius * 2, Radius * 2)
+      else
+        FPreview.Canvas.Rectangle(DrawRc);
       FPreview.Canvas.Pen.Width := 1;
+      FPreview.Canvas.Pen.Style := psSolid;
       FPreview.Canvas.Brush.Style := bsSolid;
     end
     else if Cmd = 'CC' then
@@ -2945,9 +3534,15 @@ begin
         LineWidth := 1;
       if LineWidth > 4 then
         LineWidth := 4;
-      FPreview.Canvas.Pen.Color := C2;
+      if IsNoColorRgb(StringGrid1.Cells[COL_C2, R]) then
+        FPreview.Canvas.Pen.Style := psClear
+      else
+      begin
+        FPreview.Canvas.Pen.Style := psSolid;
+        FPreview.Canvas.Pen.Color := C2;
+      end;
       FPreview.Canvas.Pen.Width := LineWidth;
-      if UpperCase(Trim(StringGrid1.Cells[COL_C1, R])) = '0X0001' then
+      if IsNoColorRgb(StringGrid1.Cells[COL_C1, R]) then
         FPreview.Canvas.Brush.Style := bsClear
       else
       begin
@@ -2956,6 +3551,7 @@ begin
       end;
       FPreview.Canvas.Ellipse(DrawRc);
       FPreview.Canvas.Pen.Width := 1;
+      FPreview.Canvas.Pen.Style := psSolid;
       FPreview.Canvas.Brush.Style := bsSolid;
     end
     else if Cmd = 'TR' then
@@ -3020,22 +3616,33 @@ begin
       if TrackHeight < 2 then
         TrackHeight := 2;
       if Value = 0 then
-      begin
-        FPreview.Canvas.Brush.Color := clBlack;
-        KnobX := DrawRc.Left + KnobRadius;
-      end
+        KnobX := DrawRc.Left + KnobRadius
       else
-      begin
-        FPreview.Canvas.Brush.Color := Rgb565ToColor(StringGrid1.Cells[COL_EXTRA, R], $0094D24A);
         KnobX := DrawRc.Right - KnobRadius;
-      end;
       KnobY := DrawRc.Top + (DrawRc.Bottom - DrawRc.Top) div 2;
+
+      FPreview.Canvas.Brush.Color := C1;
       FPreview.Canvas.Pen.Width := TrackHeight;
-      FPreview.Canvas.Pen.Color := C2;
+      FPreview.Canvas.Pen.Color := C1;
+      FPreview.Canvas.RoundRect(DrawRc.Left, DrawRc.Top, DrawRc.Right, DrawRc.Bottom,
+        DrawRc.Bottom - DrawRc.Top, DrawRc.Bottom - DrawRc.Top);
+      if Value <> 0 then
+      begin
+        FPreview.Canvas.Brush.Color := LightenColor(C2, 45);
+        FPreview.Canvas.Pen.Color := LightenColor(C2, 45);
+        FPreview.Canvas.RoundRect(DrawRc.Left, DrawRc.Top,
+          KnobX + KnobRadius, DrawRc.Bottom,
+          DrawRc.Bottom - DrawRc.Top, DrawRc.Bottom - DrawRc.Top);
+      end;
+
+      FPreview.Canvas.Pen.Width := TrackHeight;
+      FPreview.Canvas.Pen.Color := C1;
+      FPreview.Canvas.Brush.Style := bsClear;
       FPreview.Canvas.RoundRect(DrawRc.Left, DrawRc.Top, DrawRc.Right, DrawRc.Bottom,
         DrawRc.Bottom - DrawRc.Top, DrawRc.Bottom - DrawRc.Top);
       FPreview.Canvas.Pen.Width := 1;
-      FPreview.Canvas.Brush.Color := C1;
+      FPreview.Canvas.Brush.Style := bsSolid;
+      FPreview.Canvas.Brush.Color := C2;
       FPreview.Canvas.Pen.Color := clBlack;
       FPreview.Canvas.Ellipse(KnobX - KnobRadius + TrackHeight * 2,
         KnobY - KnobRadius + TrackHeight * 2,
@@ -3101,6 +3708,8 @@ begin
   end;
 end;
 
+//======================================================
+// Начинает выбор, перемещение или изменение размера элемента на VLCD.
 procedure TForm1.PreviewMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   Resize: Boolean;
@@ -3124,6 +3733,8 @@ begin
   FResizing := Resize;
 end;
 
+//======================================================
+// Обрабатывает перемещение мыши и перетаскивание элемента на VLCD.
 procedure TForm1.PreviewMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
 var
   P: TPoint;
@@ -3157,12 +3768,16 @@ begin
   end;
 end;
 
+//======================================================
+// Завершает перетаскивание или изменение размера элемента на VLCD.
 procedure TForm1.PreviewMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 begin
   FDragging := False;
   FResizing := False;
 end;
 
+//======================================================
+// Обрабатывает выбор ячейки таблицы и выбирает соответствующую строку.
 procedure TForm1.GridSelectCell(Sender: TObject; ACol, ARow: Integer; var CanSelect: Boolean);
 begin
   CanSelect := True;
@@ -3170,6 +3785,8 @@ begin
     SelectRow(ARow);
 end;
 
+//======================================================
+// Выбирает строку таблицы по клику мыши.
 procedure TForm1.GridMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   Col: Integer;
@@ -3180,6 +3797,8 @@ begin
     SelectRow(Row);
 end;
 
+//======================================================
+// Рисует ячейки таблицы команд и маркер выбранной строки.
 procedure TForm1.GridDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
   Points: array[0..2] of TPoint;
@@ -3221,6 +3840,8 @@ begin
   end;
 end;
 
+//======================================================
+// Проверяет введённое значение таблицы и обновляет предпросмотр.
 procedure TForm1.GridSetEditText(Sender: TObject; ACol, ARow: Integer; const Value: string);
 var
   LineWidth: Integer;
@@ -3276,11 +3897,14 @@ begin
     end;
     FSelectedRow := ARow;
     LoadInputsFromRow(ARow);
+    UpdateDefaultColorsFromRow(ARow);
     StringGrid1.Invalidate;
     RepaintPreview;
   end;
 end;
 
+//======================================================
+// Рисует ячейку цветовой палитры и метки назначенных цветов.
 procedure TForm1.PaletteGridDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect; State: TGridDrawState);
 var
   Index: Integer;
@@ -3292,28 +3916,12 @@ var
   Brightness: Integer;
 begin
   Index := ARow * PALETTE_COLS + ACol;
-  if Index = 31 then
-  begin
-    StringGrid2.Canvas.Brush.Color := clWhite;
-    StringGrid2.Canvas.FillRect(Rect);
-    StringGrid2.Canvas.Pen.Color := clRed;
-    StringGrid2.Canvas.MoveTo(Rect.Left + 2, Rect.Top + 2);
-    StringGrid2.Canvas.LineTo(Rect.Right - 2, Rect.Bottom - 2);
-    StringGrid2.Canvas.MoveTo(Rect.Right - 2, Rect.Top + 2);
-    StringGrid2.Canvas.LineTo(Rect.Left + 2, Rect.Bottom - 2);
-    StringGrid2.Canvas.Font.Color := clRed;
-    StringGrid2.Canvas.TextOut(Rect.Left + 4, Rect.Top + 8, 'NO');
-  end
-  else
-  begin
-    StringGrid2.Canvas.Brush.Color := PaletteCellColor(Index);
-    StringGrid2.Canvas.FillRect(Rect);
-  end;
+  StringGrid2.Canvas.Brush.Color := PaletteCellColor(Index);
+  StringGrid2.Canvas.FillRect(Rect);
   StringGrid2.Canvas.Pen.Color := clBlack;
   StringGrid2.Canvas.Rectangle(Rect);
 
   LabelText := '';
-  if Index <> 31 then
   begin
     CellRgb := UpperCase(PaletteCellRgb565(Index));
     if CellRgb = UpperCase(Trim(FDefaultLineRgb)) then
@@ -3341,10 +3949,7 @@ begin
   if LabelText <> '' then
   begin
     StringGrid2.Canvas.Font.Style := [fsBold];
-    if Index = 31 then
-      TextBg := clWhite
-    else
-      TextBg := PaletteCellColor(Index);
+    TextBg := PaletteCellColor(Index);
     TextRgb := ColorToRGB(TextBg);
     Brightness := GetRValue(TextRgb) * 30 + GetGValue(TextRgb) * 59 +
       GetBValue(TextRgb) * 11;
@@ -3360,6 +3965,8 @@ begin
   end;
 end;
 
+//======================================================
+// Назначает цвет из палитры активному цветовому полю.
 procedure TForm1.PaletteGridMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   C: Integer;
@@ -3373,15 +3980,12 @@ begin
   if (C < 0) or (R < 0) then
     Exit;
   Index := R * PALETTE_COLS + C;
-  if (Index = 31) and (FActiveColorField <> cfBack) then
-    Exit;
   RgbText := PaletteCellRgb565(Index);
-  if Index = 31 then
-    ApplyPaletteColorToActiveField(RgbText, clBtnFace)
-  else
-    ApplyPaletteColorToActiveField(RgbText, PaletteCellColor(Index));
+  ApplyPaletteColorToActiveField(RgbText, PaletteCellColor(Index));
 end;
 
+//======================================================
+// Применяет цвет старого ColorGrid к выбранному элементу.
 procedure TForm1.ColorGridClick(Sender: TObject);
 var
   Cmd: string;
@@ -3409,6 +4013,8 @@ begin
   RepaintPreview;
 end;
 
+//======================================================
+// Обновляет строку элемента при изменении числовых полей.
 procedure TForm1.InputSpinChange(Sender: TObject);
 begin
   if FLoadingInputs then
@@ -3416,6 +4022,24 @@ begin
   UpdateRowFromInputs(FSelectedRow);
 end;
 
+//======================================================
+// Обновляет текст кнопки или надписи после изменения поля Edit4.
+procedure TForm1.TextEditChange(Sender: TObject);
+begin
+  if FLoadingInputs then
+    Exit;
+  if (FSelectedRow < 1) or (FSelectedRow >= StringGrid1.RowCount) then
+    Exit;
+  if (UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow])) <> 'BT') and
+    (UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow])) <> 'TX') then
+    Exit;
+  StringGrid1.Cells[COL_TEXT, FSelectedRow] := Edit4.Text;
+  Edit1.Text := ScriptFromRow(FSelectedRow);
+  RepaintPreview;
+end;
+
+//======================================================
+// Обновляет толщину линии выбранного элемента.
 procedure TForm1.LineTrackChange(Sender: TObject);
 var
   LineWidth: Integer;
@@ -3434,28 +4058,9 @@ begin
   RepaintPreview;
 end;
 
-procedure TForm1.RadiusTrackChange(Sender: TObject);
-var
-  Radius: Integer;
-begin
-  if FLoadingInputs then
-    Exit;
-  if (FSelectedRow < 1) or (FSelectedRow >= StringGrid1.RowCount) then
-    Exit;
-  Radius := TTrackBar(Sender).Position;
-  if Radius < 0 then
-    Radius := 0;
-  if Radius > 80 then
-    Radius := 80;
-  SpinEdit5.Value := Radius;
-  if UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow])) = 'RR' then
-  begin
-    StringGrid1.Cells[COL_EXTRA, FSelectedRow] := IntToStr(Radius);
-    Edit1.Text := ScriptFromRow(FSelectedRow);
-    RepaintPreview;
-  end;
-end;
 
+//======================================================
+// Обновляет шрифт выбранного текстового элемента.
 procedure TForm1.FontListClick(Sender: TObject);
 begin
   if FLoadingInputs then
@@ -3467,6 +4072,8 @@ begin
   RepaintPreview;
 end;
 
+//======================================================
+// Позволяет заменить файл GFX-шрифта для предпросмотра.
 procedure TForm1.Button9Click(Sender: TObject);
 var
   FontId: Integer;
@@ -3512,7 +4119,9 @@ begin
   StatusBar1.SimpleText := 'Preview font selected: ' + ExtractFileName(SelectedFile);
 end;
 
-procedure TForm1.AlignRadioClick(Sender: TObject);
+//======================================================
+// Обновляет выравнивание текста выбранного элемента после выбора в списке.
+procedure TForm1.AlignComboChange(Sender: TObject);
 begin
   if FLoadingInputs then
     Exit;
@@ -3524,29 +4133,48 @@ begin
   RepaintPreview;
 end;
 
+//======================================================
+// Обрабатывает переключение RTS.
 procedure TForm1.RtsCheckClick(Sender: TObject);
 begin
   ApplyRts;
 end;
 
+//======================================================
+// Обрабатывает включение или отключение UDP-режима.
 procedure TForm1.UdpCheckClick(Sender: TObject);
 begin
   if CheckBox3.Checked then
-    SetUdpStateColor(clLime)
+  begin
+    SetUdpStateColor(clLime);
+    if Assigned(FPortMonitor) then
+      FPortMonitor.Enabled := True;
+  end
   else
+  begin
+    CloseUdpSocket;
     SetUdpStateColor(clGreen);
+    if (FPort = INVALID_HANDLE_VALUE) and Assigned(FPortMonitor) then
+      FPortMonitor.Enabled := False;
+  end;
 end;
 
+//======================================================
+// Обрабатывает кнопку дублирования выбранного элемента.
 procedure TForm1.DoubleButtonClick(Sender: TObject);
 begin
   DuplicateSelectedRow;
 end;
 
+//======================================================
+// Обрабатывает кнопку удаления выбранного элемента.
 procedure TForm1.DeleteButtonClick(Sender: TObject);
 begin
   DeleteSelectedRow;
 end;
 
+//======================================================
+// Очищает список элементов редактора.
 procedure TForm1.ClearButtonClick(Sender: TObject);
 begin
   StringGrid1.RowCount := 2;
@@ -3554,16 +4182,22 @@ begin
   SelectRow(1);
 end;
 
+//======================================================
+// Сохраняет текущий скрипт кнопкой Save.
 procedure TForm1.SaveButtonClick(Sender: TObject);
 begin
   SaveDesignToFile('current.txt');
 end;
 
+//======================================================
+// Загружает текущий скрипт кнопкой Load.
 procedure TForm1.LoadButtonClick(Sender: TObject);
 begin
   LoadDesignFromFile('current.txt');
 end;
 
+//======================================================
+// Обрабатывает кнопку Clear LCD и отправку очистки экрана.
 procedure TForm1.Button8MouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   Line: string;
@@ -3581,11 +4215,15 @@ begin
   end;
 end;
 
+//======================================================
+// Загружает демонстрационный скрипт.
 procedure TForm1.DemoButtonClick(Sender: TObject);
 begin
   LoadDesignFromFile('demo.txt');
 end;
 
+//======================================================
+// Отправляет одну текущую команду на ESP.
 procedure TForm1.SendButtonClick(Sender: TObject);
 begin
   SendLine(Trim(Edit1.Text));
@@ -3593,6 +4231,8 @@ begin
     StatusBar1.SimpleText := 'Line sent: ' + Trim(Edit1.Text);
 end;
 
+//======================================================
+// Отправляет весь текущий скрипт на ESP.
 procedure TForm1.UploadButtonClick(Sender: TObject);
 var
   R: Integer;
@@ -3628,6 +4268,9 @@ begin
       Continue;
     if not UploadImageRowToEsp(R) then
       Exit;
+    Line := Trim(ScriptFromRow(R));
+    if Line = '' then
+      Continue;
     SendLine(Line);
     if SerialEnabled and (not UdpEnabled) and (FPort = INVALID_HANDLE_VALUE) then
       Exit;
@@ -3640,12 +4283,16 @@ begin
 end;
 
 
+//======================================================
+// Открывает или закрывает COM-порт двойным кликом по индикатору.
 procedure TForm1.Shape4MouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 begin
   if (Button = mbLeft) and (ssDouble in Shift) then
     OpenClosePort;
 end;
 
+//======================================================
+// Запрашивает у ESP IP-адрес для UDP-соединения.
 procedure TForm1.ShowIpButtonClick(Sender: TObject);
 begin
   if FPort = INVALID_HANDLE_VALUE then
@@ -3657,6 +4304,8 @@ begin
   StatusBar1.SimpleText := 'SHOWIP sent via COM';
 end;
 
+//======================================================
+// Выбирает файл JPG и привязывает его к выбранному элементу.
 procedure TForm1.PictureLoadButtonClick(Sender: TObject);
 var
   Dialog: TOpenDialog;
@@ -3691,6 +4340,8 @@ begin
   end;
 end;
 
+//======================================================
+// Вставляет картинку из буфера обмена в JPG-элемент.
 procedure TForm1.PicturePasteButtonClick(Sender: TObject);
 var
   Bitmap: TBitmap;
@@ -3705,6 +4356,9 @@ var
   SrcY: Integer;
   SrcW: Integer;
   SrcH: Integer;
+  ScalePercent: Integer;
+  OutW: Integer;
+  OutH: Integer;
   N: Integer;
 begin
   if (not Clipboard.HasFormat(CF_BITMAP)) and (not Clipboard.HasFormat(CF_DIB)) then
@@ -3735,7 +4389,8 @@ begin
       SrcY := 0;
       SrcW := Bitmap.Width;
       SrcH := Bitmap.Height;
-      if not Form3.ExecuteCrop(TempFileName, SrcX, SrcY, SrcW, SrcH) then
+      ScalePercent := 100;
+      if not Form3.ExecuteCropWithScale(TempFileName, SrcX, SrcY, SrcW, SrcH, ScalePercent) then
         Exit;
 
       if (SrcW < 4) or (SrcH < 4) then
@@ -3748,10 +4403,19 @@ begin
       if SrcH < 1 then
         SrcH := 1;
 
+      if ScalePercent < 1 then
+        ScalePercent := 1;
+      OutW := MulDiv(SrcW, ScalePercent, 100);
+      OutH := MulDiv(SrcH, ScalePercent, 100);
+      if OutW < 1 then
+        OutW := 1;
+      if OutH < 1 then
+        OutH := 1;
+
       Cropped.PixelFormat := pf24bit;
-      Cropped.Width := SrcW;
-      Cropped.Height := SrcH;
-      Cropped.Canvas.CopyRect(Rect(0, 0, SrcW, SrcH), Bitmap.Canvas,
+      Cropped.Width := OutW;
+      Cropped.Height := OutH;
+      Cropped.Canvas.CopyRect(Rect(0, 0, OutW, OutH), Bitmap.Canvas,
         Rect(SrcX, SrcY, SrcX + SrcW, SrcY + SrcH));
 
       TargetDir := IncludeTrailingPathDelimiter(SdRootPath) + 'images\';
@@ -3773,8 +4437,8 @@ begin
       StringGrid1.Cells[COL_EXTRA, FSelectedRow] := '1/1';
       StringGrid1.Cells[COL_SRCX, FSelectedRow] := '0';
       StringGrid1.Cells[COL_SRCY, FSelectedRow] := '0';
-      StringGrid1.Cells[COL_SRCW, FSelectedRow] := IntToStr(SrcW);
-      StringGrid1.Cells[COL_SRCH, FSelectedRow] := IntToStr(SrcH);
+      StringGrid1.Cells[COL_SRCW, FSelectedRow] := IntToStr(OutW);
+      StringGrid1.Cells[COL_SRCH, FSelectedRow] := IntToStr(OutH);
       UpdateImageRowSize(FSelectedRow);
       LoadInputsFromRow(FSelectedRow);
       StringGrid1.Invalidate;
@@ -3797,19 +4461,27 @@ begin
   end;
 end;
 
+//======================================================
+// Периодически опрашивает COM и UDP входящие события.
 procedure TForm1.PortMonitorTimer(Sender: TObject);
 begin
-  if FPort = INVALID_HANDLE_VALUE then
-    Exit;
-  if not PortAlive then
+  if UdpEnabled then
+    PollUdpInput;
+
+  if FPort <> INVALID_HANDLE_VALUE then
   begin
-    StatusBar1.SimpleText := 'Port lost: ' + ComboBox1.Text;
-    ClosePort(True);
-    Exit;
+    if not PortAlive then
+    begin
+      StatusBar1.SimpleText := 'Port lost: ' + ComboBox1.Text;
+      ClosePort(True);
+      Exit;
+    end;
+    PollPortInput;
   end;
-  PollPortInput;
 end;
 
+//======================================================
+// Добавляет выбранный тип компонента из панели элементов.
 procedure TForm1.PaletteElementClick(Sender: TObject);
 begin
   if UpperCase(TControl(Sender).Hint) = 'JPG' then
@@ -3821,6 +4493,8 @@ begin
     AddElement(TControl(Sender).Hint);
 end;
 
+//======================================================
+// Добавляет фигуру из панели элементов по клику мыши.
 procedure TForm1.PaletteShapeMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 begin
   if Button = mbLeft then
