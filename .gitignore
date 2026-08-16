@@ -4,12 +4,19 @@
 .vscode/launch.json
 .vscode/ipch/
 include/ota_secrets.h
-tools/NXTGUI/*.dcu
-tools/NXTGUI/*.ddp
-tools/NXTGUI/*.exe
-tools/NXTGUI/*.~*
-tools/NXTGUI/dcu/
-tools/NXTGUI/build_check/
-tools/NXTGUI/current.txt
-tools/NXTGUI/NXTGUIMaker.ini
+tools/GUI_Maker/sd/startup.txt
+tools/GUI_Maker/sd/system/startup.txt
+tools/GUI_Maker/*.dcu
+tools/GUI_Maker/*.ddp
+tools/GUI_Maker/*.exe
+tools/GUI_Maker/*.~*
+tools/GUI_Maker/dcu/
+tools/GUI_Maker/build_check/
+tools/GUI_Maker/current.txt
+tools/GUI_Maker/GUIMaker.ini
+tools/**/*.dcu
+tools/**/*.ddp
+tools/**/*.exe
+tools/**/*.~*
+pictures/~$*
 

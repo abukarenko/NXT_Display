@@ -1,0 +1,16 @@
+; Copy this file to /startup.txt on the microSD card.
+; The firmware tries each non-empty Wi-Fi profile for up to 5 seconds.
+
+SSID = MyPrimaryNetwork
+PASS = MyPrimaryPassword
+
+SSID1 = MyBackupNetwork
+PASS1 = MyBackupPassword
+
+SSID2 = MyThirdNetwork
+PASS2 = MyThirdPassword
+
+; Commands after SCREEN are executed when startup finishes.
+SCREEN =
+CL|0x2104
+TX|1|16|10|NXT Display|0xFFFF|0x2104|4

@@ -1,14 +1,14 @@
 #pragma once
 
-#include <FontsRus/FreeMono12.h>
-#include <FontsRus/FreeSans6.h>
-#include <FontsRus/FreeSans8.h>
-#include <FontsRus/FreeSans10.h>
-#include <FontsRus/FreeSans12.h>
-#include <FontsRus/FreeSansBold12.h>
-#include <FontsRus/FreeSansBold14.h>
-#include <FontsRus/FreeSansBold16.h>
-#include <FontsRus/FreeSansBold18.h>
+#include <FreeMono12.h>
+#include <FreeSans6.h>
+#include <FreeSans8.h>
+#include <FreeSans10.h>
+#include <FreeSans12.h>
+#include <FreeSansBold12.h>
+#include <FreeSansBold14.h>
+#include <FreeSansBold16.h>
+#include <FreeSansBold18.h>
 
 struct GuiFontEntry {
   uint8_t id;
