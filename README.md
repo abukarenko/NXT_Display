@@ -411,6 +411,189 @@ JPG|3|100|60|/images/panel.jpg|1/2|40|20|160|120
 
 Baseline JPEG files are the safest choice; progressive JPEG is not supported by the decoder.
 
+### Protocol examples / Recipes
+
+The following recipes are complete command lines that can be sent over USB Serial, UART2 or UDP. Send each line separately and terminate serial/UART commands with `\n`.
+
+#### Button with `CLICK` handling
+
+Create a button with ID `1`:
+
+```text
+BT|1|20|250|140|50|START|0x001F|0xFFFF|0xFFFF|2|4|C|C
+```
+
+A complete tap produces `DOWN`, `UP` and `CLICK`. Run the application action only after the matching `CLICK` event:
+
+```text
+EV|BT|1|DOWN|72|274
+EV|BT|1|UP|72|274
+EV|BT|1|CLICK|72|274
+```
+
+Host-side handling rule: when the fields are `EV|BT|1|CLICK|...`, start the requested operation. The final two fields are the touch coordinates and are not needed when the button ID is sufficient.
+
+#### RPM indicator updated by ID
+
+Draw a fixed-size value area so the opaque background clears the previous number:
+
+```text
+TX|10|20|20|RPM: 1250|0xFFFF|0x0000|8|220|50|L|C
+```
+
+Update the indicator by sending another `TX` command with the same ID `10`:
+
+```text
+TX|10|20|20|RPM: 2875|0xFFFF|0x0000|8|220|50|L|C
+```
+
+The second command replaces the registered `TX|10` scene entry, so `SS` returns only the current RPM definition.
+
+#### X/Y/Z coordinate block
+
+Use one stable text ID per coordinate:
+
+```text
+TX|20|20|80|X: +012.50|0xF800|0x0000|5|180|32|L|C
+TX|21|20|116|Y: -003.25|0x07E0|0x0000|5|180|32|L|C
+TX|22|20|152|Z: +101.80|0x001F|0x0000|5|180|32|L|C
+```
+
+Update only the values that changed, retaining their IDs and geometry:
+
+```text
+TX|20|20|80|X: +013.10|0xF800|0x0000|5|180|32|L|C
+TX|22|20|152|Z: +101.75|0x001F|0x0000|5|180|32|L|C
+```
+
+#### Track bar with a separate value label
+
+Create track bar `2` and text label `30`:
+
+```text
+TR|2|40|210|260|32|35|100|0x4208|0xFFE0
+TX|30|320|210|35|0xFFFF|0x0000|6|100|32|C|C
+```
+
+Dragging the thumb can produce events such as:
+
+```text
+EV|TR|2|DOWN|35|131|226
+EV|TR|2|CHANGE|67|214|226
+EV|TR|2|UP|67|214|226
+EV|TR|2|CLICK|67|214|226
+```
+
+The format is `EV|TR|id|event|value|x|y`. On `EV|TR|2|CHANGE`, read field 5 as the new value and update only the separate label:
+
+```text
+TX|30|320|210|67|0xFFFF|0x0000|6|100|32|C|C
+```
+
+The firmware redraws `TR|2` and updates its stored scene value while the user drags it, so echoing another `TR` command is unnecessary.
+
+#### Switch with `EV|SW`
+
+Create switch `3` in the off state:
+
+```text
+TX|31|300|80|POWER|0xFFFF|0x0000|4|100|32|C|C
+SW|3|315|116|70|32|0|0x4208|0x07E0
+```
+
+A completed tap toggles the state inside the firmware. A typical off-to-on sequence is:
+
+```text
+EV|SW|3|DOWN|0|350|132
+EV|SW|3|CHANGE|1|350|132
+EV|SW|3|UP|1|350|132
+EV|SW|3|CLICK|1|350|132
+```
+
+The format is `EV|SW|id|event|value|x|y`. Treat `EV|SW|3|CHANGE|1|...` as the authoritative new state. The firmware has already redrawn the switch and changed the stored `SW|3` line used by `SS`.
+
+#### Progress bar
+
+Create progress bar `4` at 0%:
+
+```text
+PB|4|40|270|300|24|0|0x07E0|0x2104|0xFFFF
+```
+
+Update it with the same ID; `percent` is constrained by the renderer to `0..100`:
+
+```text
+PB|4|40|270|300|24|42|0x07E0|0x2104|0xFFFF
+PB|4|40|270|300|24|100|0x07E0|0x2104|0xFFFF
+```
+
+#### JPEG from microSD
+
+Check that the card is ready, then draw a baseline JPEG from it:
+
+```text
+SD
+JPG|5|260|20|/images/logo.jpg|1/1
+```
+
+Draw a source rectangle beginning at `(40,20)`, 160 × 120 pixels, decoded at half size:
+
+```text
+JPG|6|260|80|/images/panel.jpg|1/2|40|20|160|120
+```
+
+`JPG` is registered in the scene only after a successful draw. Keep the file at the same microSD path when a saved scene will later be replayed.
+
+#### Simple full control screen
+
+This sequence builds a complete 480 × 320 control screen. `CL` starts a new scene and removes all previously registered objects:
+
+```text
+CL|0x0000
+TX|1|0|8|MOTOR CONTROL|0xFFFF|0x0000|8|480|42|C|C
+TX|10|20|62|RPM: 1250|0xFFE0|0x0000|8|250|48|L|C
+TX|31|330|62|POWER|0xFFFF|0x0000|4|110|32|C|C
+SW|3|350|98|70|32|0|0x4208|0x07E0
+TX|32|20|140|SPEED|0xFFFF|0x0000|4|100|30|L|C
+TR|2|20|174|300|32|35|100|0x4208|0xFFE0
+TX|30|340|174|35|0xFFFF|0x0000|6|100|32|C|C
+PB|4|20|226|420|22|35|0x07E0|0x2104|0xFFFF
+BT|1|20|266|140|44|START|0x001F|0xFFFF|0xFFFF|2|4|C|C
+BT|2|320|266|120|44|STOP|0xF800|0xFFFF|0xFFFF|2|4|C|C
+```
+
+Handle `EV|BT|1|CLICK|...` as Start, `EV|BT|2|CLICK|...` as Stop, `EV|TR|2|CHANGE|value|...` as the speed setpoint, and `EV|SW|3|CHANGE|value|...` as the power state. Update `TX|10`, `TX|30` and `PB|4` with the same IDs as live values change.
+
+#### Get and restore a scene with `SS`
+
+Request the current registered scene:
+
+```text
+SS
+```
+
+The response is a count plus replayable command lines:
+
+```text
+OK|SS|BEGIN|4
+CL|0x0000
+TX|10|20|20|RPM: 2875|0xFFFF|0x0000|8|220|50|L|C
+TR|2|40|210|260|32|67|100|0x4208|0xFFE0
+SW|3|315|116|70|32|1|0x4208|0x07E0
+OK|SS|END
+```
+
+To save a scene on the host, store only the lines between the markers. To restore it after reset or reconnect, send those lines back in the same order, one command per line:
+
+```text
+CL|0x0000
+TX|10|20|20|RPM: 2875|0xFFFF|0x0000|8|220|50|L|C
+TR|2|40|210|260|32|67|100|0x4208|0xFFE0
+SW|3|315|116|70|32|1|0x4208|0x07E0
+```
+
+`SS` itself only returns a snapshot; it does not accept scene data. Replaying the returned commands performs the restoration. Current `TR` and `SW` values are included because touch changes update their stored scene definitions.
+
 ### Example command sequence
 
 ```text
