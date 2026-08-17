@@ -1036,16 +1036,16 @@ The startup demo is stored as command strings in firmware and is executed throug
 
 ## Local SD card image
 
-The repository contains an `sd` folder that mirrors the physical microSD card.
-Prepare images and scripts there on the desktop, then copy the contents of
-`sd` to the root of the card.
+The desktop editor keeps an `sd` folder next to `GUIMaker.exe`. This folder
+mirrors the physical microSD card. Prepare images and scripts there, then copy
+the contents of `tools/GUI_Maker/sd` to the root of the card.
 
 Recommended layout:
 
 ```text
-sd/icons    -> /icons
-sd/images   -> /images
-sd/scripts  -> /scripts
+tools/GUI_Maker/sd/icons    -> /icons
+tools/GUI_Maker/sd/images   -> /images
+tools/GUI_Maker/sd/scripts  -> /scripts
 ```
 
 Scripts are plain text files with one GUI command per line. Empty lines and
@@ -1064,7 +1064,7 @@ C:\Users\basachka\.platformio\penv\Scripts\pio.exe run -t upload
 
 # OTA updates
 
-1. Copy `include/ota_secrets.example.h` to `include/ota_secrets.h`, enter up to three Wi-Fi profiles (`WIFI_SSID_1` through `WIFI_SSID_3`) and an OTA password. Empty profiles are skipped. The local secrets file is ignored by Git.
+1. Configure up to three Wi-Fi profiles in `/startup.txt` on the microSD card (see `tools/GUI_Maker/sd/startup.example.txt`). As a fallback, copy `include/ota_secrets.example.h` to `include/ota_secrets.h` and enter `WIFI_SSID_1` through `WIFI_SSID_3`. Empty profiles are skipped; files containing real passwords are ignored by Git.
 2. Upload the firmware once over USB with the `esp32dev` environment.
 3. At startup the display shows each Wi-Fi connection attempt for up to 5 seconds. After a successful connection it shows the selected SSID and IP address. Confirm in the serial monitor that `OTA ready: nxt-display.local` is printed.
 4. Upload subsequent builds with the `esp32dev_ota` environment.

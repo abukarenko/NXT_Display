@@ -1,0 +1,12 @@
+{
+  "name": "TFT_eSPI",
+  "version": "2.5.43-local",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "srcFilter": [
+      "+<TFT_eSPI.cpp>",
+      "-<Extensions/*.cpp>"
+    ]
+  }
+}

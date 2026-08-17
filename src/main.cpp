@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <SD.h>
 #include <SPI.h>
@@ -6,6 +6,7 @@
 #include <TJpg_Decoder.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <Preferences.h>
 #include "gui_fonts.h"
 
 #if __has_include("ota_secrets.h")
@@ -55,7 +56,10 @@ constexpr uint8_t SD_CS_PIN = 27;
 constexpr uint32_t SD_SPI_FREQUENCY = 4000000;
 constexpr uint32_t UI_UART_BAUD = 115200;
 constexpr uint16_t GUI_UDP_PORT = 4210;
-constexpr size_t COMMAND_BUFFER_SIZE = 192;
+// Leave headroom for long JPG paths, labels and future UDP commands. The
+// desktop uploader still sends small acknowledged blocks, but normal script
+// lines must not be truncated at the UDP boundary.
+constexpr size_t COMMAND_BUFFER_SIZE = 384;
 constexpr uint16_t TOUCH_THRESHOLD = 250;
 constexpr bool DISPLAY_INVERTED = true;
 constexpr bool TOUCH_INVERT_X = true;
@@ -67,21 +71,44 @@ constexpr int16_t GFX_FONT_Y_CORRECTION = -3;
 constexpr char OTA_HOSTNAME[] = "nxt-display";
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 5000;
 constexpr uint32_t TOUCH_POLL_INTERVAL_MS = 25;
-constexpr size_t MAX_UI_BUTTONS = 16;
-constexpr size_t MAX_UI_TOUCH_CONTROLS = 16;
-constexpr size_t MAX_SCENE_LINES = 96;
-constexpr size_t BUTTON_LABEL_SIZE = 24;
+constexpr char STARTUP_CONFIG_PATH[] = "/startup.txt";
+constexpr char WIFI_PREF_NAMESPACE[] = "nxtwifi";
+constexpr char WIFI_PREF_LAST_SSID[] = "last_ssid";
+constexpr size_t STARTUP_WIFI_COUNT = 3;
+constexpr size_t STARTUP_TEXT_SIZE = 64;
+constexpr int SD_FONT_ID_BASE = 100;
+constexpr int SD_FONT_ID_MAX = 999;
+constexpr char SD_FONT_DIR[] = "/fonts";
+struct StartupWifiCredential {
+  char ssid[STARTUP_TEXT_SIZE];
+  char password[STARTUP_TEXT_SIZE];
+};
 
-struct WiFiProfile {
+struct StaticWifiCredential {
   const char *ssid;
   const char *password;
 };
 
-const WiFiProfile WIFI_PROFILES[] = {
+struct WifiAttempt {
+  const char *ssid;
+  const char *password;
+  const char *source;
+};
+
+const StaticWifiCredential STATIC_WIFI[STARTUP_WIFI_COUNT] = {
   {WIFI_SSID_1, WIFI_PASSWORD_1},
   {WIFI_SSID_2, WIFI_PASSWORD_2},
   {WIFI_SSID_3, WIFI_PASSWORD_3}
 };
+
+StartupWifiCredential startupWifi[STARTUP_WIFI_COUNT];
+char lastWifiSsid[STARTUP_TEXT_SIZE];
+bool startupConfigLoaded = false;
+bool startupScreenAvailable = false;
+constexpr size_t MAX_UI_BUTTONS = 16;
+constexpr size_t MAX_UI_TOUCH_CONTROLS = 16;
+constexpr size_t MAX_SCENE_LINES = 96;
+constexpr size_t BUTTON_LABEL_SIZE = 24;
 
 struct UiButton {
   int id;
@@ -92,6 +119,10 @@ struct UiButton {
   uint16_t fill;
   uint16_t outline;
   uint16_t text;
+  int lineWidth;
+  int font;
+  char hAlign;
+  char vAlign;
   char label[BUTTON_LABEL_SIZE];
 };
 
@@ -111,6 +142,10 @@ struct UiTouchControl {
   int maximum;
   uint16_t track;
   uint16_t thumb;
+  uint16_t element;
+  uint16_t outline;
+  int lineWidth;
+  char orientation;
   uint16_t *background;
   size_t backgroundPixels;
 };
@@ -138,6 +173,7 @@ uint32_t resetAtMs = 0;
 IPAddress udpEventPeerIp;
 uint16_t udpEventPeerPort = 0;
 uint16_t currentScreenColor = TFT_BLACK;
+bool screenFillActive = false;
 File sdUploadFile;
 String sdUploadPath;
 size_t sdUploadExpectedSize = 0;
@@ -234,16 +270,21 @@ const BitmapAsset BITMAP_ASSETS[] = {
   {"wifi", 16, 16, ICON_WIFI}
 };
 
-void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb);
-void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb);
+void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element);
+void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element);
+void drawVerticalTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element);
 void drawProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t fill, uint16_t background, uint16_t outline);
-void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t track, uint16_t thumb);
+void drawVerticalProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t fill, uint16_t background, uint16_t outline);
+void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t outline, uint16_t thumb, uint16_t track, uint16_t element, int lineWidth);
 void drawTrackBarDirty(UiTouchControl &control, int oldValue, int newValue);
 void drawAlignedTextBox(const char *text, int x, int y, int w, int h, uint16_t color,
                         uint16_t background, int font, char hAlign, char vAlign,
                         bool fillBackground);
 bool processCommand(char *line, Print &reply);
-void drawStartupScreen();
+bool loadStartupConfig();
+void runStartupScreenScript();
+void drawWifiStatus(const char *line1, const char *line2, uint16_t color);
+void resetScene();
 
 void resetSceneLines()
 {
@@ -329,8 +370,12 @@ void updateSceneControlValue(const char *command, int id, int value)
 
 void printSceneSnapshot(Print &stream)
 {
+  size_t lineCount = sceneLineCount + (screenFillActive ? 1 : 0);
   stream.print("OK|SS|BEGIN|");
-  stream.println(sceneLineCount);
+  stream.println(lineCount);
+  if (screenFillActive) {
+    stream.printf("0x%04X\n", currentScreenColor);
+  }
   for (size_t i = 0; i < sceneLineCount; ++i) {
     stream.println(sceneLines[i].line);
   }
@@ -359,11 +404,14 @@ void resetScene()
 }
 
 bool registerTouchControl(UiTouchKind kind, int id, int x, int y, int w, int h,
-                          int value, int maximum, uint16_t track, uint16_t thumb)
+                           int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element,
+                           uint16_t outline = TFT_BLACK, int lineWidth = 1, char orientation = 'H')
 {
+  char normalizedOrientation = static_cast<char>(toupper(static_cast<unsigned char>(orientation)));
   size_t controlIndex = uiTouchControlCount;
   for (size_t i = 0; i < uiTouchControlCount; ++i) {
-    if (uiTouchControls[i].kind == kind && uiTouchControls[i].id == id) {
+    if (uiTouchControls[i].kind == kind && uiTouchControls[i].id == id &&
+        (kind != UI_TOUCH_TRACK || uiTouchControls[i].orientation == normalizedOrientation)) {
       controlIndex = i;
       break;
     }
@@ -398,47 +446,12 @@ bool registerTouchControl(UiTouchKind kind, int id, int x, int y, int w, int h,
   control.maximum = max(maximum, 1);
   control.track = track;
   control.thumb = thumb;
+  control.element = element;
+  control.outline = outline;
+  control.lineWidth = constrain(lineWidth, 1, 4);
+  control.orientation = normalizedOrientation;
   return true;
 }
-
-const char *STARTUP_DEMO_SCRIPT[] = {
-  "CL|0x2104",
-  "TX|1|16|10|MASH3 GRBL|0xBFFF|0x2104|4",
-  "BX|1|288|8|182|40|0xA965|0xFBEF|4",
-  "TX|2|304|17|USB WAIT|0xFFFF|0xA965|2",
-  "BX|2|10|54|225|46|0x18E3|0x0000|0",
-  "BX|3|10|54|42|46|0x05FF|0x05FF|0",
-  "TX|3|18|61|X|0x0000|0x05FF|9",
-  "TX|4|96|60|+0.00|0xBFFF|0x18E3|4",
-  "BX|4|245|54|225|46|0x18E3|0x0000|0",
-  "BX|5|245|54|42|46|0x07E8|0x07E8|0",
-  "TX|5|253|61|Y|0x0000|0x07E8|9",
-  "TX|6|331|60|+0.00|0xBFFF|0x18E3|4",
-  "BX|6|10|105|225|46|0x18E3|0x0000|0",
-  "BX|7|10|105|42|46|0xF81F|0xF81F|0",
-  "TX|7|18|112|Z|0x0000|0xF81F|9",
-  "TX|8|96|111|+0.00|0xBFFF|0x18E3|4",
-  "BX|8|245|105|225|46|0x18E3|0x0000|0",
-  "BX|9|245|105|42|46|0xC600|0xC600|0",
-  "TX|9|253|112|A|0x0000|0xC600|9",
-  "TX|10|331|111|+0.00|0xBFFF|0x18E3|4",
-  "TX|11|10|163|LIMITS|0xBFFF|0x2104|2",
-  "BX|10|105|158|38|34|0x2104|0xBFFF|0",
-  "TX|12|118|166|X|0xBFFF|0x2104|2",
-  "BX|11|147|158|38|34|0x2104|0xBFFF|0",
-  "TX|13|160|166|Y|0xBFFF|0x2104|2",
-  "BX|12|189|158|38|34|0x2104|0xBFFF|0",
-  "TX|14|202|166|Z|0xBFFF|0x2104|2",
-  "BX|13|231|158|38|34|0x2104|0xBFFF|0",
-  "TX|15|244|166|P|0xBFFF|0x2104|2",
-  "TX|16|310|163|SPINDLE  0 RPM|0xFDD7|0x2104|2",
-  "BX|14|55|199|185|40|0xF2B4|0x0000|0",
-  "TX|17|89|205|ALARM|0x4000|0xF2B4|4",
-  "BT|1|10|246|109|70|FLUID|0x21C7|0x863B|0xFFFF",
-  "BT|2|127|246|109|70|SPINDLE|0x3146|0xDCD2|0xFFFF",
-  "BT|3|244|246|109|70|PAUSE|0x4200|0xFE00|0xFFFF",
-  "BT|4|361|246|109|70|UNLOCK|0x4000|0xF882|0xFFFF"
-};
 
 void updateHeartbeat()
 {
@@ -457,6 +470,28 @@ void updateHeartbeat()
   digitalWrite(HEARTBEAT_LED_PIN, ledState[step] ? HIGH : LOW);
 }
 
+bool parseColorLiteral(const char *value, uint16_t &color)
+{
+  if (value == nullptr || value[0] == '\0') {
+    return false;
+  }
+  char *end = nullptr;
+  unsigned long parsed = strtoul(value, &end, 0);
+  if (end == value || *end != '\0' || parsed > 0xFFFFUL) {
+    return false;
+  }
+  color = static_cast<uint16_t>(parsed);
+  return true;
+}
+
+void fillScreenFromScriptColor(uint16_t color)
+{
+  currentScreenColor = color;
+  screenFillActive = true;
+  tft.fillScreen(color);
+  resetScene();
+}
+
 uint16_t parseColor(const char *value, uint16_t fallback)
 {
   if (value == nullptr || value[0] == '\0') {
@@ -472,6 +507,19 @@ uint16_t parseColor(const char *value, uint16_t fallback)
   return static_cast<uint16_t>(color);
 }
 
+
+uint8_t rgb565Luma(uint16_t color)
+{
+  uint8_t r = ((color >> 11) & 0x1F) << 3;
+  uint8_t g = ((color >> 5) & 0x3F) << 2;
+  uint8_t b = (color & 0x1F) << 3;
+  return static_cast<uint8_t>((static_cast<uint16_t>(r) * 30 + static_cast<uint16_t>(g) * 59 + static_cast<uint16_t>(b) * 11) / 100);
+}
+
+uint16_t contrastRgb565(uint16_t color)
+{
+  return rgb565Luma(color) > 140 ? TFT_BLACK : TFT_WHITE;
+}
 uint16_t lightenRgb565(uint16_t color, uint8_t amount)
 {
   amount = min<uint8_t>(amount, 100);
@@ -543,8 +591,69 @@ bool isNumericFontText(const char *text)
   return true;
 }
 
+bool isSdFontId(int font)
+{
+  return font >= SD_FONT_ID_BASE && font <= SD_FONT_ID_MAX;
+}
+
+bool sdFontBaseNameForId(int font, String &fontBaseName)
+{
+  if (!sdReady || !isSdFontId(font)) {
+    return false;
+  }
+
+  String fontPath = String(SD_FONT_DIR) + "/font" + font + ".vlw";
+  if (!SD.exists(fontPath)) {
+    return false;
+  }
+
+  fontBaseName = String(SD_FONT_DIR + 1) + "/font" + font;
+  return true;
+}
+
+bool loadSdFontById(int font)
+{
+  String fontBaseName;
+  if (!sdFontBaseNameForId(font, fontBaseName)) {
+    return false;
+  }
+
+  tft.loadFont(fontBaseName, SD);
+  return true;
+}
+
+int sdFontIdFromFileName(String name)
+{
+  int slash = name.lastIndexOf('/');
+  if (slash >= 0) {
+    name = name.substring(slash + 1);
+  }
+  name.toLowerCase();
+  if (!name.endsWith(".vlw")) {
+    return -1;
+  }
+  name = name.substring(0, name.length() - 4);
+  if (!name.startsWith("font")) {
+    return -1;
+  }
+  name = name.substring(4);
+  if (name.length() == 0) {
+    return -1;
+  }
+  for (int i = 0; i < name.length(); ++i) {
+    if (!isDigit(name[i])) {
+      return -1;
+    }
+  }
+  int id = name.toInt();
+  return isSdFontId(id) ? id : -1;
+}
+
 int resolveTextFont(const char *text, int requestedFont)
 {
+  if (isSdFontId(requestedFont)) {
+    return requestedFont;
+  }
   return constrain(requestedFont, 1, GUI_FONT_COUNT);
 }
 
@@ -568,6 +677,50 @@ void mapCp1251ToRusFont(const char *text, char *out, size_t outSize)
         c -= 112;
       }
       out[j++] = static_cast<char>(c);
+    }
+  }
+  out[j] = '\0';
+}
+
+void appendUtf8Codepoint(uint16_t cp, char *out, size_t outSize, size_t &j)
+{
+  if (cp < 0x80) {
+    if (j + 1 < outSize) out[j++] = static_cast<char>(cp);
+  } else if (cp < 0x800) {
+    if (j + 2 < outSize) {
+      out[j++] = static_cast<char>(0xC0 | (cp >> 6));
+      out[j++] = static_cast<char>(0x80 | (cp & 0x3F));
+    }
+  } else {
+    if (j + 3 < outSize) {
+      out[j++] = static_cast<char>(0xE0 | (cp >> 12));
+      out[j++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+      out[j++] = static_cast<char>(0x80 | (cp & 0x3F));
+    }
+  }
+}
+
+void cp1251ToUtf8(const char *text, char *out, size_t outSize)
+{
+  if (outSize == 0) {
+    return;
+  }
+
+  size_t j = 0;
+  if (text != nullptr) {
+    for (size_t i = 0; text[i] != '\0' && j < outSize - 1; ++i) {
+      uint8_t c = static_cast<uint8_t>(text[i]);
+      uint16_t cp = c;
+      if (c == 0xA8) {
+        cp = 0x0401;
+      } else if (c == 0xB8) {
+        cp = 0x0451;
+      } else if (c == 0xB9) {
+        cp = 0x2116;
+      } else if (c >= 0xC0) {
+        cp = 0x0410 + (c - 0xC0);
+      }
+      appendUtf8Codepoint(cp, out, outSize, j);
     }
   }
   out[j] = '\0';
@@ -597,8 +750,10 @@ void printHelp(Print &stream)
   stream.println("    Reply OK and restart ESP after a short delay.");
   stream.println("  SS");
   stream.println("    Return current scene snapshot as command lines with live values.");
-  stream.println("  TF");
-  stream.println("    Show all loaded TFT_eSPI and GFX font samples.");
+  stream.println("  TF" );
+  stream.println("    Show all loaded TFT_eSPI and GFX font samples." );
+  stream.println("  FL" );
+  stream.println("    List SD VLW fonts from /fonts. Font IDs start at 100." );
   stream.println("  CL|color");
   stream.println("    Clear screen. Example: CL|0x0000");
   stream.println("  BL|0/1");
@@ -618,15 +773,15 @@ void printHelp(Print &stream)
   stream.println("    Example: TX|1|20|90|Hello|0xFFFF|0x0001|2|120|30|C|C");
   stream.println("  TW|id|x|y|w|h|title|text|fill|outline");
   stream.println("    Draw text window. Use fill 0x0001 for transparent body.");
-  stream.println("  TR|id|x|y|w|h|value|max|track|thumb");
-  stream.println("    Draw horizontal trackbar.");
+  stream.println("  TR|id|x|y|w|h|value|max|track|thumb|element");
+  stream.println("    Draw horizontal trackbar. Element is the filled track color; optional for old scripts.");
   stream.println("  PB|id|x|y|w|h|percent|fill|background|outline");
   stream.println("    Draw horizontal progress bar.");
   stream.println("  CC|id|x|y|diameter|fill|outline|line");
   stream.println("    Draw circle. Use fill 0x0001 for no fill.");
-  stream.println("  SW|id|x|y|w|h|0/1|track|thumb");
-  stream.println("    Draw switch. Colors match TR/SB: track, thumb. 0 is off/left, 1 is on/right.");
-  stream.println("  SB|id|x|y|w|h|H/V|value|max|track|thumb");
+  stream.println("  SW|id|x|y|w|h|0/1|stroke|thumb|fill|element|line");
+  stream.println("    Draw switch. Colors: stroke outline, thumb, inactive fill, active fill. Line is 1..4.");
+  stream.println("  SB|id|x|y|w|h|H/V|value|max|track|thumb|element");
   stream.println("    Draw horizontal or vertical scrollbar.");
   stream.println("  BM|id|x|y|name|foreground|background|scale");
   stream.println("    Draw bitmap. Names: play, stop, wifi.");
@@ -637,6 +792,18 @@ void printHelp(Print &stream)
   stream.println("    List files in a microSD directory. Example: LS|/");
   stream.println("  FS|path");
   stream.println("    Show one microSD file size. Example: FS|/lcd2.jpg");
+  stream.println("  FI|path");
+  stream.println("    Show microSD file size and last-write timestamp.");
+  stream.println("  RM|path");
+  stream.println("    Delete one microSD file. Example: RM|/scripts/script1.nxt");
+  stream.println("  SL");
+  stream.println("    List scripts in /scripts. SL|path lists all files in path.");
+  stream.println("  DL" );
+  stream.println("    List microSD root directories for the desktop editor." );
+  stream.println("  FL" );
+  stream.println("    List /fonts/*.vlw as ID/name pairs. Examples: font100.vlw or 100.vlw." );
+  stream.println("  FR|path|offset|len");
+  stream.println("    Read a microSD file chunk as HEX. Example: FR|/scripts/demo.nxt|0|64");
   stream.println("  JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH");
   stream.println("    Draw a JPEG or selected source area. Scale: 1/4, 1/2, 1/1, 2/1, 4/1.");
   stream.println("    Example: JPG|1|20|20|/icons/play.jpg|1/2|0|0|64|64");
@@ -718,6 +885,253 @@ bool printSdFileSize(const char *path, Print &stream)
   file.close();
   return true;
 }
+
+bool printSdFileInfo(const char *path, Print &stream)
+{
+  if (!sdReady) {
+    stream.println("ERR|fi|sd_not_ready");
+    return false;
+  }
+  if (path == nullptr || path[0] == '\0') {
+    stream.println("ERR|fi|missing_path");
+    return false;
+  }
+
+  String resolvedPath = path[0] == '/' ? String(path) : String('/') + path;
+  File file = SD.open(resolvedPath, FILE_READ);
+  if (!file || file.isDirectory()) {
+    stream.print("ERR|fi|not_found|");
+    stream.println(resolvedPath);
+    if (file) {
+      file.close();
+    }
+    return false;
+  }
+
+  const size_t fileSize = file.size();
+  const time_t lastWrite = file.getLastWrite();
+  stream.printf("OK|FI|%s|%u|%lu\n", resolvedPath.c_str(),
+                static_cast<unsigned>(fileSize), static_cast<unsigned long>(lastWrite));
+  file.close();
+  return true;
+}
+
+
+bool deleteSdFile(const char *path, Print &stream)
+{
+  if (!sdReady) {
+    stream.println("ERR|rm|sd_not_ready");
+    return false;
+  }
+  if (path == nullptr || path[0] == '\0') {
+    stream.println("ERR|rm|missing_path");
+    return false;
+  }
+
+  String resolvedPath = path[0] == '/' ? String(path) : String('/') + path;
+  if (resolvedPath == "/") {
+    stream.println("ERR|rm|bad_path|/");
+    return false;
+  }
+  if (!SD.exists(resolvedPath)) {
+    stream.print("ERR|rm|not_found|");
+    stream.println(resolvedPath);
+    return false;
+  }
+
+  File file = SD.open(resolvedPath, FILE_READ);
+  if (file && file.isDirectory()) {
+    file.close();
+    stream.print("ERR|rm|is_directory|");
+    stream.println(resolvedPath);
+    return false;
+  }
+  if (file) {
+    file.close();
+  }
+
+  if (!SD.remove(resolvedPath)) {
+    stream.print("ERR|rm|delete_failed|");
+    stream.println(resolvedPath);
+    return false;
+  }
+
+  stream.printf("OK|RM|%s\n", resolvedPath.c_str());
+  return true;
+}
+bool listSdDirectories(Print &stream)
+{
+  if (!sdReady) {
+    stream.println("ERR|dl|sd_not_ready");
+    return false;
+  }
+
+  File directory = SD.open("/");
+  if (!directory || !directory.isDirectory()) {
+    stream.println("ERR|dl|open");
+    if (directory) {
+      directory.close();
+    }
+    return false;
+  }
+
+  stream.print("OK|DL|/");
+  for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+    if (entry.isDirectory()) {
+      String name = entry.name();
+      int slash = name.lastIndexOf('/');
+      if (slash >= 0) {
+        name = name.substring(slash + 1);
+      }
+      if (name.length() > 0 && name != "System Volume Information") {
+        stream.print('|');
+        stream.print('/');
+        stream.print(name);
+      }
+    }
+    entry.close();
+  }
+  stream.println();
+  directory.close();
+  return true;
+}
+
+bool listSdScripts(const char *path, Print &stream)
+{
+  if (!sdReady) {
+    stream.println("ERR|sl|sd_not_ready");
+    return false;
+  }
+
+  const char *resolvedPath = path && path[0] ? path : "/scripts";
+  if (!SD.exists(resolvedPath)) {
+    stream.println("OK|SL");
+    return true;
+  }
+
+  File directory = SD.open(resolvedPath);
+  if (!directory || !directory.isDirectory()) {
+    stream.println("ERR|sl|open");
+    if (directory) {
+      directory.close();
+    }
+    return false;
+  }
+
+  stream.print("OK|SL");
+  for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+    if (!entry.isDirectory()) {
+      String name = entry.name();
+      int slash = name.lastIndexOf('/');
+      if (slash >= 0) {
+        name = name.substring(slash + 1);
+      }
+      String lower = name;
+      lower.toLowerCase();
+      if ((path && path[0]) || lower.endsWith(".nxt") || lower.endsWith(".txt")) {
+        stream.print('|');
+        stream.print(name);
+      }
+    }
+    entry.close();
+  }
+  stream.println();
+  directory.close();
+  return true;
+}
+
+bool listSdFonts(Print &stream)
+{
+  if (!sdReady) {
+    stream.println("ERR|fl|sd_not_ready");
+    return false;
+  }
+
+  if (!SD.exists(SD_FONT_DIR)) {
+    stream.println("OK|FL");
+    return true;
+  }
+
+  File directory = SD.open(SD_FONT_DIR);
+  if (!directory || !directory.isDirectory()) {
+    stream.println("ERR|fl|open");
+    if (directory) {
+      directory.close();
+    }
+    return false;
+  }
+
+  stream.print("OK|FL");
+  for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+    if (!entry.isDirectory()) {
+      String name = entry.name();
+      int id = sdFontIdFromFileName(name);
+      if (id >= 0) {
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) {
+          name = name.substring(slash + 1);
+        }
+        stream.print('|');
+        stream.print(id);
+        stream.print('|');
+        stream.print(name);
+      }
+    }
+    entry.close();
+  }
+  stream.println();
+  directory.close();
+  return true;
+}
+
+bool readSdFileChunk(const char *path, size_t offset, size_t requestedSize, Print &stream)
+{
+  if (!sdReady) {
+    stream.println("ERR|fr|sd_not_ready");
+    return false;
+  }
+  if (path == nullptr || path[0] == '\0') {
+    stream.println("ERR|fr|missing_path");
+    return false;
+  }
+
+  String resolvedPath = path[0] == '/' ? String(path) : String('/') + path;
+  File file = SD.open(resolvedPath, FILE_READ);
+  if (!file || file.isDirectory()) {
+    stream.print("ERR|fr|not_found|");
+    stream.println(resolvedPath);
+    if (file) {
+      file.close();
+    }
+    return false;
+  }
+
+  size_t totalSize = file.size();
+  if (requestedSize < 1) {
+    requestedSize = 1;
+  }
+  if (requestedSize > 64) {
+    requestedSize = 64;
+  }
+  if (offset > totalSize) {
+    offset = totalSize;
+  }
+
+  file.seek(offset);
+  static const char hex[] = "0123456789ABCDEF";
+  stream.printf("OK|FR|%s|%u|%u|", resolvedPath.c_str(), static_cast<unsigned>(offset), static_cast<unsigned>(totalSize));
+  size_t sent = 0;
+  while (sent < requestedSize && file.available()) {
+    uint8_t value = static_cast<uint8_t>(file.read());
+    stream.write(hex[value >> 4]);
+    stream.write(hex[value & 0x0F]);
+    ++sent;
+  }
+  stream.println();
+  file.close();
+  return true;
+}
+
 
 bool jpegOutput(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *pixels)
 {
@@ -1073,6 +1487,8 @@ bool runSdScript(const char *path, Print &reply)
   size_t len = 0;
   uint32_t lineNumber = 1;
   bool ok = true;
+  bool screenSectionActive = false;
+  bool sawScreenSection = false;
 
   auto executeLine = [&]() {
     buffer[len] = '\0';
@@ -1087,7 +1503,37 @@ bool runSdScript(const char *path, Print &reply)
     }
     *end = '\0';
 
-    if (start[0] == '\0' || start[0] == '#') {
+    if (start[0] == '\0' || start[0] == '#' || start[0] == ';') {
+      return true;
+    }
+
+    char *equals = strchr(start, '=');
+    char *pipe = strchr(start, '|');
+    if (equals != nullptr && (pipe == nullptr || equals < pipe)) {
+      char key[24];
+      size_t keyLen = min(static_cast<size_t>(equals - start), sizeof(key) - 1);
+      memcpy(key, start, keyLen);
+      key[keyLen] = '\0';
+      char *keyStart = key;
+      while (*keyStart != '\0' && isspace(static_cast<unsigned char>(*keyStart))) {
+        ++keyStart;
+      }
+      char *keyEnd = keyStart + strlen(keyStart);
+      while (keyEnd > keyStart && isspace(static_cast<unsigned char>(*(keyEnd - 1)))) {
+        --keyEnd;
+      }
+      *keyEnd = '\0';
+      for (char *p = keyStart; *p != '\0'; ++p) {
+        *p = static_cast<char>(toupper(static_cast<unsigned char>(*p)));
+      }
+      if (strcmp(keyStart, "SCREEN") == 0) {
+        screenSectionActive = true;
+        sawScreenSection = true;
+      }
+      return true;
+    }
+
+    if (sawScreenSection && !screenSectionActive) {
       return true;
     }
 
@@ -1151,6 +1597,202 @@ void blinkBacklightAtBoot()
   setBacklight(true);
 }
 
+String trimStartupLine(String line)
+{
+  line.trim();
+  return line;
+}
+
+void setStartupText(char *dest, size_t destSize, const String &value)
+{
+  if (dest == nullptr || destSize == 0) {
+    return;
+  }
+  strlcpy(dest, value.c_str(), destSize);
+}
+
+void clearStartupWifi()
+{
+  for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) {
+    startupWifi[i].ssid[0] = '\0';
+    startupWifi[i].password[0] = '\0';
+  }
+}
+
+bool loadStartupConfig()
+{
+  clearStartupWifi();
+  startupConfigLoaded = false;
+  startupScreenAvailable = false;
+
+  if (!sdReady) {
+    Serial.println("Startup config skipped: SD not ready");
+    return false;
+  }
+
+  File config = SD.open(STARTUP_CONFIG_PATH, FILE_READ);
+  if (!config) {
+    Serial.printf("Startup config not found: %s\n", STARTUP_CONFIG_PATH);
+    return false;
+  }
+
+  while (config.available()) {
+    String line = trimStartupLine(config.readStringUntil('\n'));
+    if (line.length() == 0 || line[0] == ';') {
+      continue;
+    }
+
+    int equalsPos = line.indexOf('=');
+    if (equalsPos < 0) {
+      continue;
+    }
+
+    String key = trimStartupLine(line.substring(0, equalsPos));
+    String value = trimStartupLine(line.substring(equalsPos + 1));
+    key.toUpperCase();
+
+    if (key == "SCREEN") {
+      startupScreenAvailable = true;
+      break;
+    }
+
+    int slot = -1;
+    bool passwordField = false;
+    if (key == "SSID") {
+      slot = 0;
+    } else if (key == "PASS") {
+      slot = 0;
+      passwordField = true;
+    } else if (key == "SSID1") {
+      slot = 1;
+    } else if (key == "PASS1") {
+      slot = 1;
+      passwordField = true;
+    } else if (key == "SSID2") {
+      slot = 2;
+    } else if (key == "PASS2") {
+      slot = 2;
+      passwordField = true;
+    }
+
+    if (slot >= 0 && slot < static_cast<int>(STARTUP_WIFI_COUNT)) {
+      if (passwordField) {
+        setStartupText(startupWifi[slot].password, sizeof(startupWifi[slot].password), value);
+      } else {
+        setStartupText(startupWifi[slot].ssid, sizeof(startupWifi[slot].ssid), value);
+      }
+      startupConfigLoaded = true;
+    }
+  }
+
+  config.close();
+  Serial.printf("Startup config loaded: wifi=%s screen=%s\n", startupConfigLoaded ? "yes" : "no",
+                startupScreenAvailable ? "yes" : "no");
+  return startupConfigLoaded || startupScreenAvailable;
+}
+
+void drawWifiStatus(const char *line1, const char *line2, uint16_t color)
+{
+  setBacklight(true);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("NXT Display", tft.width() / 2, 70, 4);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(line1 ? line1 : "Wi-Fi", tft.width() / 2, 140, 4);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(line2 ? line2 : "", tft.width() / 2, 190, 2);
+}
+
+void drawWifiProgress(uint32_t elapsedMs)
+{
+  constexpr int16_t barX = 40;
+  constexpr int16_t barY = 225;
+  constexpr int16_t barW = 400;
+  constexpr int16_t barH = 22;
+  constexpr int16_t inset = 3;
+  int16_t filledW = static_cast<int16_t>(((barW - inset * 2) *
+                                          min(elapsedMs, WIFI_CONNECT_TIMEOUT_MS)) /
+                                         WIFI_CONNECT_TIMEOUT_MS);
+
+  tft.drawRoundRect(barX, barY, barW, barH, 5, TFT_WHITE);
+  tft.fillRoundRect(barX + inset, barY + inset, barW - inset * 2, barH - inset * 2, 3, TFT_DARKGREY);
+  if (filledW > 0) {
+    tft.fillRect(barX + inset, barY + inset, filledW, barH - inset * 2, TFT_SKYBLUE);
+  }
+}
+
+void drawWifiConnected(const char *ssid)
+{
+  setBacklight(true);
+  String ipText = WiFi.localIP().toString();
+  int ipScale = 2;
+  if (tft.textWidth(ipText, 4) * ipScale > tft.width() - 20) {
+    ipScale = 1;
+  }
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("WI-FI CONNECTED", tft.width() / 2, 38, 4);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("SSID", tft.width() / 2, 88, 2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(ssid ? ssid : "", tft.width() / 2, 116, 2);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("IP ADDRESS", tft.width() / 2, 170, 2);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setTextSize(ipScale);
+  tft.drawString(ipText, tft.width() / 2, 225, 4);
+  tft.setTextSize(1);
+  delay(3000);
+}
+
+
+void runStartupScreenScript()
+{
+  if (!sdReady || !startupScreenAvailable) {
+    return;
+  }
+
+  File config = SD.open(STARTUP_CONFIG_PATH, FILE_READ);
+  if (!config) {
+    return;
+  }
+
+  bool inScreen = false;
+  uint32_t scriptLine = 0;
+  while (config.available()) {
+    String line = trimStartupLine(config.readStringUntil('\n'));
+    if (line.length() == 0 || line[0] == ';') {
+      continue;
+    }
+
+    if (!inScreen) {
+      int equalsPos = line.indexOf('=');
+      if (equalsPos >= 0) {
+        String key = trimStartupLine(line.substring(0, equalsPos));
+        key.toUpperCase();
+        if (key == "SCREEN") {
+          inScreen = true;
+        }
+      }
+      continue;
+    }
+
+    char commandBuffer[COMMAND_BUFFER_SIZE];
+    strlcpy(commandBuffer, line.c_str(), sizeof(commandBuffer));
+    if (!processCommand(commandBuffer, Serial)) {
+      Serial.printf("Startup screen command failed at line %lu: %s\n", static_cast<unsigned long>(scriptLine + 1),
+                    line.c_str());
+    }
+    ++scriptLine;
+  }
+
+  config.close();
+  Serial.printf("Startup screen script executed: %lu command(s)\n", static_cast<unsigned long>(scriptLine));
+}
 void drawOtaProgress(unsigned int percent, const char *status, uint16_t statusColor)
 {
   percent = min(percent, 100U);
@@ -1202,131 +1844,160 @@ void drawOtaProgress(unsigned int percent, const char *status, uint16_t statusCo
   }
 }
 
-void drawWiFiConnecting(const char *ssid, size_t profileNumber)
+bool loadLastWifiSsid()
 {
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("WI-FI CONNECTION", tft.width() / 2, 54, 4);
-
-  char profileText[32];
-  snprintf(profileText, sizeof(profileText), "Profile %u of 3", static_cast<unsigned>(profileNumber));
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(profileText, tft.width() / 2, 105, 2);
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(ssid, tft.width() / 2, 140, 2);
-  tft.drawRoundRect(40, 180, 400, 24, 5, TFT_WHITE);
-  tft.fillRoundRect(44, 184, 392, 16, 3, TFT_DARKGREY);
-
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("Connecting...", tft.width() / 2, 240, 2);
-}
-
-void updateWiFiProgress(uint32_t elapsedMs)
-{
-  int16_t width = static_cast<int16_t>((392ULL * min(elapsedMs, WIFI_CONNECT_TIMEOUT_MS)) /
-                                       WIFI_CONNECT_TIMEOUT_MS);
-  if (width > 0) {
-    tft.fillRect(44, 184, width, 16, TFT_SKYBLUE);
+  lastWifiSsid[0] = '\0';
+  Preferences prefs;
+  if (!prefs.begin(WIFI_PREF_NAMESPACE, true)) {
+    Serial.println("Wi-Fi last SSID: NVS open failed");
+    return false;
   }
-}
 
-void drawWiFiResult(bool connected, const char *ssid)
-{
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(connected ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  tft.drawString(connected ? "WI-FI CONNECTED" : "WI-FI NOT FOUND", tft.width() / 2, 65, 4);
-
-  if (connected) {
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString("SSID", tft.width() / 2, 125, 2);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(ssid, tft.width() / 2, 153, 2);
-
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString("IP ADDRESS", tft.width() / 2, 205, 2);
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString(WiFi.localIP().toString(), tft.width() / 2, 238, 4);
-  } else {
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString("Check the configured profiles", tft.width() / 2, 145, 2);
+  String saved = prefs.getString(WIFI_PREF_LAST_SSID, "");
+  prefs.end();
+  if (saved.length() == 0) {
+    return false;
   }
+
+  saved.toCharArray(lastWifiSsid, sizeof(lastWifiSsid));
+  Serial.printf("Wi-Fi last SSID loaded: %s\n", lastWifiSsid);
+  return lastWifiSsid[0] != '\0';
 }
 
-bool connectWiFiProfiles()
+void saveLastWifiSsid(const char *ssid)
 {
-  size_t configuredProfiles = 0;
-  for (const WiFiProfile &profile : WIFI_PROFILES) {
-    if (profile.ssid[0] != '\0') {
-      ++configuredProfiles;
+  if (ssid == nullptr || ssid[0] == '\0') {
+    return;
+  }
+  if (strcmp(lastWifiSsid, ssid) == 0) {
+    return;
+  }
+
+  Preferences prefs;
+  if (!prefs.begin(WIFI_PREF_NAMESPACE, false)) {
+    Serial.println("Wi-Fi last SSID: NVS save open failed");
+    return;
+  }
+  prefs.putString(WIFI_PREF_LAST_SSID, ssid);
+  prefs.end();
+  strlcpy(lastWifiSsid, ssid, sizeof(lastWifiSsid));
+  Serial.printf("Wi-Fi last SSID saved: %s\n", lastWifiSsid);
+}
+
+const char *findPasswordForSsid(const char *ssid)
+{
+  if (ssid == nullptr || ssid[0] == '\0') {
+    return nullptr;
+  }
+
+  for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) {
+    if (startupWifi[i].ssid[0] != '\0' && strcmp(startupWifi[i].ssid, ssid) == 0) {
+      return startupWifi[i].password;
+    }
+  }
+  for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) {
+    if (STATIC_WIFI[i].ssid[0] != '\0' && strcmp(STATIC_WIFI[i].ssid, ssid) == 0) {
+      return STATIC_WIFI[i].password;
+    }
+  }
+  return nullptr;
+}
+
+bool addWifiAttempt(WifiAttempt *attempts, size_t maxAttempts, size_t &count, const char *ssid, const char *password, const char *source)
+{
+  if (ssid == nullptr || ssid[0] == '\0' || count >= maxAttempts) {
+    return false;
+  }
+
+  for (size_t i = 0; i < count; ++i) {
+    if (strcmp(attempts[i].ssid, ssid) == 0) {
+      return false;
     }
   }
 
-  if (configuredProfiles == 0) {
-    Serial.println("Wi-Fi disabled: configure include/ota_secrets.h");
-    return false;
+  attempts[count].ssid = ssid;
+  attempts[count].password = password ? password : "";
+  attempts[count].source = source ? source : "wifi";
+  ++count;
+  return true;
+}
+
+
+void startOta()
+{
+  constexpr size_t MAX_WIFI_ATTEMPTS = 1 + STARTUP_WIFI_COUNT + STARTUP_WIFI_COUNT;
+  WifiAttempt attempts[MAX_WIFI_ATTEMPTS];
+  size_t attemptCount = 0;
+
+  bool hasLastWifi = loadLastWifiSsid();
+  if (hasLastWifi) {
+    const char *lastPassword = findPasswordForSsid(lastWifiSsid);
+    if (lastPassword != nullptr) {
+      addWifiAttempt(attempts, MAX_WIFI_ATTEMPTS, attemptCount, lastWifiSsid, lastPassword, "last");
+    } else {
+      Serial.printf("Wi-Fi last SSID skipped, password not configured: %s\n", lastWifiSsid);
+    }
+  }
+
+  for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) {
+    addWifiAttempt(attempts, MAX_WIFI_ATTEMPTS, attemptCount, startupWifi[i].ssid, startupWifi[i].password, "sd");
+  }
+  for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) {
+    addWifiAttempt(attempts, MAX_WIFI_ATTEMPTS, attemptCount, STATIC_WIFI[i].ssid, STATIC_WIFI[i].password, "static");
+  }
+
+  if (attemptCount == 0) {
+    drawWifiStatus("Wi-Fi not configured", "startup.txt or ota_secrets.h", TFT_RED);
+    Serial.println("OTA disabled: configure startup.txt or include/ota_secrets.h");
+    return;
   }
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setHostname(OTA_HOSTNAME);
 
-  size_t profileNumber = 0;
-  for (const WiFiProfile &profile : WIFI_PROFILES) {
-    if (profile.ssid[0] == '\0') {
-      continue;
-    }
-    ++profileNumber;
+  for (size_t i = 0; i < attemptCount && WiFi.status() != WL_CONNECTED; ++i) {
+    const char *ssid = attempts[i].ssid;
+    const char *password = attempts[i].password;
 
-    WiFi.disconnect();
+    char statusLine[96];
+    snprintf(statusLine, sizeof(statusLine), "Wi-Fi %s %u/%u", attempts[i].source, static_cast<unsigned>(i + 1),
+             static_cast<unsigned>(attemptCount));
+    drawWifiStatus(statusLine, ssid, TFT_YELLOW);
+
+    WiFi.disconnect(true, true);
     delay(100);
-    drawWiFiConnecting(profile.ssid, profileNumber);
-    Serial.printf("Connecting to Wi-Fi profile %u: %s", static_cast<unsigned>(profileNumber), profile.ssid);
-    WiFi.begin(profile.ssid, profile.password);
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.setHostname(OTA_HOSTNAME);
+    WiFi.begin(ssid, password ? password : "");
 
+    Serial.printf("Connecting to Wi-Fi for OTA [%u/%u, %s]: %s", static_cast<unsigned>(i + 1),
+                  static_cast<unsigned>(attemptCount), attempts[i].source, ssid);
     uint32_t startedAt = millis();
-    uint32_t lastDisplayUpdate = 0;
-    uint32_t lastSerialUpdate = 0;
+    uint32_t lastProgressUpdate = 0;
     while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
       uint32_t elapsed = millis() - startedAt;
-      if (elapsed - lastDisplayUpdate >= 100) {
-        updateWiFiProgress(elapsed);
-        lastDisplayUpdate = elapsed;
+      if (elapsed - lastProgressUpdate >= 100) {
+        drawWifiProgress(elapsed);
+        lastProgressUpdate = elapsed;
       }
       delay(50);
-      if (elapsed - lastSerialUpdate >= 250) {
+      if (elapsed % 250 < 50) {
         Serial.print('.');
-        lastSerialUpdate = elapsed;
       }
     }
     Serial.println();
-
-    if (WiFi.status() == WL_CONNECTED) {
-      updateWiFiProgress(WIFI_CONNECT_TIMEOUT_MS);
-      drawWiFiResult(true, profile.ssid);
-      Serial.printf("Wi-Fi connected: SSID=%s IP=%s\n", profile.ssid, WiFi.localIP().toString().c_str());
-      delay(3000);
-      return true;
-    }
-
-    Serial.printf("Wi-Fi profile timed out after %lu ms: %s\n",
-                  static_cast<unsigned long>(WIFI_CONNECT_TIMEOUT_MS), profile.ssid);
   }
 
-  drawWiFiResult(false, "");
-  Serial.println("Wi-Fi unavailable: all configured profiles failed");
-  delay(2000);
-  return false;
-}
-
-void startOta()
-{
-  if (!connectWiFiProfiles()) {
-    drawStartupScreen();
+  if (WiFi.status() != WL_CONNECTED) {
+    drawWifiStatus("Wi-Fi failed", "all configured networks", TFT_RED);
+    Serial.println("OTA unavailable: Wi-Fi connection timed out for all configured networks");
     return;
   }
+
+  saveLastWifiSsid(WiFi.SSID().c_str());
+  drawWifiConnected(WiFi.SSID().c_str());
 
   ArduinoOTA.setHostname(OTA_HOSTNAME);
   if (OTA_PASSWORD[0] != '\0') {
@@ -1360,11 +2031,11 @@ void startOta()
   ArduinoOTA.begin();
   otaReady = true;
   udpReady = GuiUdp.begin(GUI_UDP_PORT) == 1;
-  Serial.printf("OTA ready: %s.local, SSID=%s, IP=%s\n", OTA_HOSTNAME,
-                WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  Serial.printf("OTA ready: %s.local, SSID=%s, IP=%s\n", OTA_HOSTNAME, WiFi.SSID().c_str(),
+                WiFi.localIP().toString().c_str());
   Serial.printf("GUI UDP %s: port %u\n", udpReady ? "ready" : "error", GUI_UDP_PORT);
-  drawStartupScreen();
 }
+
 
 void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t fill,
                 uint16_t outline, uint16_t text, int lineWidth, int font,
@@ -1402,6 +2073,10 @@ void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t 
   button.fill = fill;
   button.outline = outline;
   button.text = text;
+  button.lineWidth = lineWidth;
+  button.font = font;
+  button.hAlign = hAlign;
+  button.vAlign = vAlign;
   strlcpy(button.label, label ? label : "", sizeof(button.label));
 
   Serial.printf("GUI button %d rendered\n", id);
@@ -1507,12 +2182,12 @@ void drawTextWindow(int id, int x, int y, int w, int h, const char *title, const
   Serial.printf("GUI window %d rendered\n", id);
 }
 
-void drawScrollBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb)
+void drawScrollBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element)
 {
-  drawScrollBar(id, x, y, w, h, h >= w ? 'V' : 'H', value, maximum, track, thumb);
+  drawScrollBar(id, x, y, w, h, h >= w ? 'V' : 'H', value, maximum, track, thumb, element);
 }
 
-void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb)
+void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element)
 {
   maximum = max(maximum, 1);
   value = constrain(value, 0, maximum);
@@ -1524,18 +2199,24 @@ void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int val
     int thumbHeight = max(18, h / 5);
     int travel = max(1, h - thumbHeight - 4);
     int thumbY = y + 2 + (travel * value) / maximum;
+    if (thumbY > y + 2) {
+      tft.fillRoundRect(x + 2, y + 2, w - 4, thumbY - (y + 2), 4, element);
+    }
     tft.fillRoundRect(x + 2, thumbY, w - 4, thumbHeight, 4, thumb);
   } else {
     int thumbWidth = max(18, w / 5);
     int travel = max(1, w - thumbWidth - 4);
     int thumbX = x + 2 + (travel * value) / maximum;
+    if (thumbX > x + 2) {
+      tft.fillRoundRect(x + 2, y + 2, thumbX - (x + 2), h - 4, 4, element);
+    }
     tft.fillRoundRect(thumbX, y + 2, thumbWidth, h - 4, 4, thumb);
   }
 
   Serial.printf("GUI scroll %d rendered\n", id);
 }
 
-void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb)
+void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element)
 {
   maximum = max(maximum, 1);
   value = constrain(value, 0, maximum);
@@ -1549,9 +2230,9 @@ void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, ui
   int travel = max(1, w - h);
   int knobX = x + knobRadius + (travel * value) / maximum;
   int knobY = y + h / 2;
-  uint16_t filledTrack = lightenRgb565(thumb, 45);
+  uint16_t filledTrack = element;
 
-  if (!registerTouchControl(UI_TOUCH_TRACK, id, x, y, w, h, value, maximum, track, thumb)) {
+  if (!registerTouchControl(UI_TOUCH_TRACK, id, x, y, w, h, value, maximum, track, thumb, element, TFT_BLACK, 1, 'H')) {
     tft.fillRect(x, y, w, h, currentScreenColor);
   }
   tft.fillRoundRect(x, trackY, w, trackHeight, radius, track);
@@ -1562,6 +2243,32 @@ void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, ui
   Serial.printf("GUI track %d rendered value=%d max=%d\n", id, value, maximum);
 }
 
+void drawVerticalTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element)
+{
+  maximum = max(maximum, 1);
+  value = constrain(value, 0, maximum);
+
+  w = max(w, 4);
+  h = max(h, w);
+  int trackWidth = max(2, w / 2);
+  int trackX = x + (w - trackWidth) / 2;
+  int radius = max(2, trackWidth / 2);
+  int knobRadius = w / 2;
+  int travel = max(1, h - w);
+  int knobX = x + w / 2;
+  int knobY = y + h - knobRadius - (travel * value) / maximum;
+  uint16_t filledTrack = element;
+
+  if (!registerTouchControl(UI_TOUCH_TRACK, id, x, y, w, h, value, maximum, track, thumb, element, TFT_BLACK, 1, 'V')) {
+    tft.fillRect(x, y, w, h, currentScreenColor);
+  }
+  tft.fillRoundRect(trackX, y, trackWidth, h, radius, track);
+  tft.fillRoundRect(trackX, knobY, trackWidth, y + h - knobY, radius, filledTrack);
+  tft.fillCircle(knobX, knobY, knobRadius, thumb);
+  tft.drawCircle(knobX, knobY, knobRadius, TFT_BLACK);
+
+  Serial.printf("GUI vertical track %d rendered value=%d max=%d\n", id, value, maximum);
+}
 int trackKnobX(const UiTouchControl &control, int value)
 {
   int maximum = max(control.maximum, 1);
@@ -1572,6 +2279,15 @@ int trackKnobX(const UiTouchControl &control, int value)
   return control.x + knobRadius + (travel * constrain(value, 0, maximum)) / maximum;
 }
 
+int trackKnobY(const UiTouchControl &control, int value)
+{
+  int maximum = max(control.maximum, 1);
+  int w = max<int>(control.w, 4);
+  int h = max<int>(control.h, w);
+  int knobRadius = w / 2;
+  int travel = max(1, h - w);
+  return control.y + h - knobRadius - (travel * constrain(value, 0, maximum)) / maximum;
+}
 void restoreTouchBackgroundRect(const UiTouchControl &control, int rx, int ry, int rw, int rh)
 {
   int left = constrain(rx, static_cast<int>(control.x), static_cast<int>(control.x + control.w));
@@ -1599,6 +2315,13 @@ void restoreTouchBackgroundRect(const UiTouchControl &control, int rx, int ry, i
 
 void drawTrackBarDirty(UiTouchControl &control, int oldValue, int newValue)
 {
+  if (control.orientation == 'V') {
+    tft.fillRect(control.x, control.y, control.w, control.h, currentScreenColor);
+    drawVerticalTrackBar(control.id, control.x, control.y, control.w, control.h,
+                         newValue, control.maximum, control.track, control.thumb, control.element);
+    return;
+  }
+
   int h = max<int>(control.h, 4);
   int w = max<int>(control.w, h);
   int trackHeight = max(2, h / 2);
@@ -1610,7 +2333,7 @@ void drawTrackBarDirty(UiTouchControl &control, int oldValue, int newValue)
   int knobY = control.y + h / 2;
   int dirtyLeft = min(oldKnobX, newKnobX) - knobRadius - 5;
   int dirtyRight = max(oldKnobX, newKnobX) + knobRadius + 5;
-  uint16_t filledTrack = lightenRgb565(control.thumb, 45);
+  uint16_t filledTrack = control.element;
 
   tft.fillCircle(oldKnobX, knobY, knobRadius + 1, currentScreenColor);
 
@@ -1658,11 +2381,39 @@ void drawProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t f
   Serial.printf("GUI progress %d rendered percent=%d\n", id, percent);
 }
 
-void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t track, uint16_t thumb)
+void drawVerticalProgressBar(int id, int x, int y, int w, int h, int percent, uint16_t fill, uint16_t background, uint16_t outline)
+{
+  percent = constrain(percent, 0, 100);
+  w = max(w, 4);
+  h = max(h, 4);
+
+  int radius = min(5, w / 3);
+  int innerX = x + 2;
+  int innerY = y + 2;
+  int innerW = max(1, w - 4);
+  int innerH = max(1, h - 4);
+  int fillH = (innerH * percent) / 100;
+  int fillY = innerY + innerH - fillH;
+
+  tft.fillRoundRect(x, y, w, h, radius, background);
+  tft.fillRoundRect(innerX, innerY, innerW, innerH, max(1, radius - 1), background);
+  if (fillH > 0) {
+    if (fillH >= innerH) {
+      tft.fillRoundRect(innerX, innerY, innerW, innerH, max(1, radius - 1), fill);
+    } else {
+      tft.fillRect(innerX, fillY, innerW, fillH, fill);
+    }
+  }
+  tft.drawRoundRect(x, y, w, h, radius, outline);
+
+  Serial.printf("GUI vertical progress %d rendered percent=%d\n", id, percent);
+}
+void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t outline, uint16_t thumb, uint16_t track, uint16_t element, int lineWidth)
 {
   state = state == 0 ? 0 : 1;
   h = max(h, 8);
   w = max(w, h * 2);
+  lineWidth = constrain(lineWidth, 1, 4);
 
   int radius = h / 2;
   int border = max(2, h / 14);
@@ -1670,21 +2421,20 @@ void drawSwitch(int id, int x, int y, int w, int h, int state, uint16_t track, u
   int knobY = y + h / 2;
   int enabledKnobInset = max(5, border * 2);
   int knobX = state ? (x + w - radius - enabledKnobInset) : (x + radius);
-  uint16_t filledTrack = lightenRgb565(thumb, 45);
+  uint16_t filledTrack = element;
 
-  if (!registerTouchControl(UI_TOUCH_SWITCH, id, x, y, w, h, state, 1, track, thumb)) {
+  if (!registerTouchControl(UI_TOUCH_SWITCH, id, x, y, w, h, state, 1, track, thumb, element, outline, lineWidth)) {
     tft.fillRect(x, y, w, h, currentScreenColor);
   }
   tft.fillRoundRect(x, y, w, h, radius, track);
   if (state) {
     tft.fillRoundRect(x, y, w, h, radius, filledTrack);
   }
-  tft.drawRoundRect(x, y, w, h, radius, track);
-  for (int i = 1; i < border; i++) {
-    tft.drawRoundRect(x + i, y + i, w - i * 2, h - i * 2, max(1, radius - i), track);
+  for (int i = 0; i < lineWidth; ++i) {
+    tft.drawRoundRect(x + i, y + i, w - i * 2, h - i * 2, max(0, radius - i), outline);
   }
   tft.fillCircle(knobX, knobY, knobRadius, thumb);
-  tft.drawCircle(knobX, knobY, knobRadius, TFT_BLACK);
+  tft.drawCircle(knobX, knobY, knobRadius, outline);
 
   Serial.printf("GUI switch %d rendered state=%d\n", id, state);
 }
@@ -1822,6 +2572,15 @@ void drawAlignedTextBox(const char *text, int x, int y, int w, int h, uint16_t c
   } else {
     tft.setTextColor(color, background);
   }
+  if (isSdFontId(resolvedFont) && loadSdFontById(resolvedFont)) {
+    char utf8Text[COMMAND_BUFFER_SIZE * 3];
+    cp1251ToUtf8(text, utf8Text, sizeof(utf8Text));
+    tft.drawString(utf8Text, drawX, drawY);
+    tft.unloadFont();
+    tft.setTextFont(1);
+    return;
+  }
+
   const GuiFontEntry *guiFont = guiFontById(resolvedFont);
   if (guiFont != nullptr) {
     tft.setFreeFont(guiFont->font);
@@ -1897,10 +2656,17 @@ int findTouchedControl(uint16_t x, uint16_t y)
   return -1;
 }
 
-int touchValueForControl(const UiTouchControl &control, uint16_t x)
+int touchValueForControl(const UiTouchControl &control, uint16_t x, uint16_t y)
 {
   if (control.kind == UI_TOUCH_SWITCH) {
     return x >= control.x + control.w / 2 ? 1 : 0;
+  }
+
+  if (control.orientation == 'V') {
+    int knobRadius = max(1, control.w / 2);
+    int travel = max(1, control.h - control.w);
+    int relativeY = constrain(control.y + control.h - knobRadius - static_cast<int>(y), 0, travel);
+    return (relativeY * max(control.maximum, 1)) / travel;
   }
 
   int knobRadius = max(1, control.h / 2);
@@ -1915,10 +2681,29 @@ void drawButtonPressedState(int buttonIndex, bool pressed)
     return;
   }
 
-  const UiButton &button = uiButtons[buttonIndex];
-  uint16_t color = pressed ? TFT_WHITE : button.outline;
-  tft.drawRoundRect(button.x, button.y, button.w, button.h, 6, color);
-  tft.drawRoundRect(button.x + 1, button.y + 1, button.w - 2, button.h - 2, 5, color);
+  UiButton button = uiButtons[buttonIndex];
+  if (!pressed) {
+    drawButton(button.id, button.x, button.y, button.w, button.h, button.label,
+               button.fill, button.outline, button.text, button.lineWidth,
+               button.font, button.hAlign, button.vAlign);
+    return;
+  }
+
+  int ringWidth = constrain(min(button.w, button.h) / 5, 5, 10);
+  uint16_t ringColor = contrastRgb565(button.fill);
+  uint16_t innerColor = ringColor == TFT_BLACK ? TFT_WHITE : TFT_BLACK;
+  for (int i = 0; i < ringWidth; ++i) {
+    int radius = max(1, 6 - min(i, 5));
+    tft.drawRoundRect(button.x + i, button.y + i,
+                      button.w - i * 2, button.h - i * 2,
+                      radius, ringColor);
+  }
+  for (int i = ringWidth; i < ringWidth + 2; ++i) {
+    int radius = max(1, 6 - min(i, 5));
+    tft.drawRoundRect(button.x + i, button.y + i,
+                      button.w - i * 2, button.h - i * 2,
+                      radius, innerColor);
+  }
 }
 
 void writeButtonEvent(Stream &stream, const UiButton &button, const char *event, uint16_t x, uint16_t y)
@@ -1956,16 +2741,19 @@ void emitButtonEvent(int buttonIndex, const char *event, uint16_t x, uint16_t y)
   sendUdpEventLine(String("EV|BT|") + button.id + "|" + event + "|" + x + "|" + y + "\n");
 }
 
-const char *touchControlKindName(UiTouchKind kind)
+const char *touchControlKindName(const UiTouchControl &control)
 {
-  return kind == UI_TOUCH_SWITCH ? "SW" : "TR";
+  if (control.kind == UI_TOUCH_SWITCH) {
+    return "SW";
+  }
+  return control.orientation == 'V' ? "VT" : "TR";
 }
 
 void writeTouchControlEvent(Stream &stream, const UiTouchControl &control,
                             const char *event, uint16_t x, uint16_t y)
 {
   stream.print("EV|");
-  stream.print(touchControlKindName(control.kind));
+  stream.print(touchControlKindName(control));
   stream.print('|');
   stream.print(control.id);
   stream.print('|');
@@ -1987,7 +2775,7 @@ void emitTouchControlEvent(int controlIndex, const char *event, uint16_t x, uint
   const UiTouchControl &control = uiTouchControls[controlIndex];
   writeTouchControlEvent(Serial, control, event, x, y);
   writeTouchControlEvent(UiSerial, control, event, x, y);
-  sendUdpEventLine(String("EV|") + touchControlKindName(control.kind) + "|" +
+  sendUdpEventLine(String("EV|") + touchControlKindName(control) + "|" +
                    control.id + "|" + event + "|" + control.value + "|" + x + "|" + y + "\n");
 }
 
@@ -1999,11 +2787,17 @@ void redrawTouchControl(int controlIndex)
 
   const UiTouchControl control = uiTouchControls[controlIndex];
   if (control.kind == UI_TOUCH_TRACK) {
-    drawTrackBar(control.id, control.x, control.y, control.w, control.h,
-                 control.value, control.maximum, control.track, control.thumb);
+    if (control.orientation == 'V') {
+      drawVerticalTrackBar(control.id, control.x, control.y, control.w, control.h,
+                           control.value, control.maximum, control.track, control.thumb, control.element);
+    } else {
+      drawTrackBar(control.id, control.x, control.y, control.w, control.h,
+                   control.value, control.maximum, control.track, control.thumb, control.element);
+    }
   } else {
     drawSwitch(control.id, control.x, control.y, control.w, control.h,
-               control.value, control.track, control.thumb);
+               control.value, control.outline, control.thumb, control.track, control.element,
+               control.lineWidth);
   }
 }
 
@@ -2015,12 +2809,12 @@ void updatePressedTouchControl(uint16_t x, uint16_t y, const char *eventName)
   }
 
   UiTouchControl &control = uiTouchControls[pressedTouchControlIndex];
-  int newValue = touchValueForControl(control, x);
+  int newValue = touchValueForControl(control, x, y);
   if (control.kind == UI_TOUCH_TRACK) {
     if (newValue != control.value || strcmp(eventName, "DOWN") == 0) {
       int oldValue = control.value;
       control.value = newValue;
-      updateSceneControlValue(touchControlKindName(control.kind), control.id, newValue);
+      updateSceneControlValue(touchControlKindName(control), control.id, newValue);
       drawTrackBarDirty(control, oldValue, newValue);
       emitTouchControlEvent(pressedTouchControlIndex, eventName, x, y);
     }
@@ -2052,7 +2846,7 @@ void updateTouchButtons()
           uiTouchControls[pressedTouchControlIndex].kind == UI_TOUCH_SWITCH) {
         uiTouchControls[pressedTouchControlIndex].value =
           uiTouchControls[pressedTouchControlIndex].value == 0 ? 1 : 0;
-        updateSceneControlValue(touchControlKindName(uiTouchControls[pressedTouchControlIndex].kind),
+        updateSceneControlValue(touchControlKindName(uiTouchControls[pressedTouchControlIndex]),
                                 uiTouchControls[pressedTouchControlIndex].id,
                                 uiTouchControls[pressedTouchControlIndex].value);
         redrawTouchControl(pressedTouchControlIndex);
@@ -2097,12 +2891,9 @@ void updateTouchButtons()
 void drawStartupScreen()
 {
   setBacklight(true);
-
-  for (const char *scriptLine : STARTUP_DEMO_SCRIPT) {
-    char commandBuffer[COMMAND_BUFFER_SIZE];
-    strlcpy(commandBuffer, scriptLine, sizeof(commandBuffer));
-    processCommand(commandBuffer, Serial);
-  }
+  resetScene();
+  currentScreenColor = TFT_BLACK;
+  tft.fillScreen(TFT_BLACK);
 }
 
 bool processCommand(char *line, Print &reply)
@@ -2117,6 +2908,13 @@ bool processCommand(char *line, Print &reply)
 
   for (char *p = command; *p != '\0'; ++p) {
     *p = static_cast<char>(toupper(static_cast<unsigned char>(*p)));
+  }
+
+  uint16_t scriptColor = 0;
+  if (parseColorLiteral(command, scriptColor)) {
+    fillScreenFromScriptColor(scriptColor);
+    sendAck(reply, original, true);
+    return true;
   }
 
   if (strcmp(command, "?") == 0) {
@@ -2159,6 +2957,10 @@ bool processCommand(char *line, Print &reply)
     return true;
   }
 
+  if (strcmp(command, "FL") == 0) {
+    return listSdFonts(reply);
+  }
+
   if (strcmp(command, "SD") == 0) {
     printSdStatus(reply);
     return sdReady;
@@ -2178,6 +2980,34 @@ bool processCommand(char *line, Print &reply)
     return printSdFileSize(path, reply);
   }
 
+  if (strcmp(command, "FI") == 0) {
+    char *path = strtok(nullptr, "|");
+    return printSdFileInfo(path, reply);
+  }
+
+  if (strcmp(command, "RM") == 0) {
+    char *path = strtok(nullptr, "|");
+    return deleteSdFile(path, reply);
+  }
+
+
+  if (strcmp(command, "SL") == 0) {
+    char *path = strtok(nullptr, "|");
+    return listSdScripts(path, reply);
+  }
+
+  if (strcmp(command, "DL") == 0) {
+    return listSdDirectories(reply);
+  }
+
+  if (strcmp(command, "FR") == 0) {
+    char *path = strtok(nullptr, "|");
+    char *offsetText = strtok(nullptr, "|");
+    char *sizeText = strtok(nullptr, "|");
+    size_t offset = offsetText ? static_cast<size_t>(strtoul(offsetText, nullptr, 10)) : 0;
+    size_t requestedSize = sizeText ? static_cast<size_t>(strtoul(sizeText, nullptr, 10)) : 64;
+    return readSdFileChunk(path, offset, requestedSize, reply);
+  }
   if (strcmp(command, "JPG") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
@@ -2226,10 +3056,7 @@ bool processCommand(char *line, Print &reply)
 
   if (strcmp(command, "CL") == 0) {
     uint16_t color = parseColor(strtok(nullptr, "|"), TFT_BLACK);
-    currentScreenColor = color;
-    tft.fillScreen(color);
-    resetScene();
-    storeSceneLine("CL", -1, original);
+    fillScreenFromScriptColor(color);
     sendAck(reply, original, true);
     return true;
   }
@@ -2314,7 +3141,8 @@ bool processCommand(char *line, Print &reply)
     int maximum = parseIntField(strtok(nullptr, "|"), 100);
     uint16_t track = parseColor(strtok(nullptr, "|"), TFT_BLACK);
     uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_CYAN);
-    drawScrollBar(id, x, y, w, h, orientation, value, maximum, track, thumb);
+    uint16_t element = parseColor(strtok(nullptr, "|"), lightenRgb565(thumb, 45));
+    drawScrollBar(id, x, y, w, h, orientation, value, maximum, track, thumb, element);
     storeSceneLine("SB", id, original);
     sendAck(reply, original, true);
     return true;
@@ -2330,12 +3158,29 @@ bool processCommand(char *line, Print &reply)
     int maximum = parseIntField(strtok(nullptr, "|"), 100);
     uint16_t track = parseColor(strtok(nullptr, "|"), TFT_DARKGREY);
     uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
-    drawTrackBar(id, x, y, w, h, value, maximum, track, thumb);
+    uint16_t element = parseColor(strtok(nullptr, "|"), lightenRgb565(thumb, 45));
+    drawTrackBar(id, x, y, w, h, value, maximum, track, thumb, element);
     storeSceneLine("TR", id, original);
     sendAck(reply, original, true);
     return true;
   }
 
+  if (strcmp(command, "VT") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    int w = parseIntField(strtok(nullptr, "|"));
+    int h = parseIntField(strtok(nullptr, "|"));
+    int value = parseIntField(strtok(nullptr, "|"));
+    int maximum = parseIntField(strtok(nullptr, "|"), 100);
+    uint16_t track = parseColor(strtok(nullptr, "|"), TFT_DARKGREY);
+    uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
+    uint16_t element = parseColor(strtok(nullptr, "|"), lightenRgb565(thumb, 45));
+    drawVerticalTrackBar(id, x, y, w, h, value, maximum, track, thumb, element);
+    storeSceneLine("VT", id, original);
+    sendAck(reply, original, true);
+    return true;
+  }
   if (strcmp(command, "PB") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
@@ -2352,6 +3197,21 @@ bool processCommand(char *line, Print &reply)
     return true;
   }
 
+  if (strcmp(command, "VP") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    int w = parseIntField(strtok(nullptr, "|"));
+    int h = parseIntField(strtok(nullptr, "|"));
+    int percent = parseIntField(strtok(nullptr, "|"));
+    uint16_t fill = parseColor(strtok(nullptr, "|"), TFT_GREEN);
+    uint16_t background = parseColor(strtok(nullptr, "|"), TFT_WHITE);
+    uint16_t outline = parseColor(strtok(nullptr, "|"), TFT_YELLOW);
+    drawVerticalProgressBar(id, x, y, w, h, percent, fill, background, outline);
+    storeSceneLine("VP", id, original);
+    sendAck(reply, original, true);
+    return true;
+  }
   if (strcmp(command, "CC") == 0) {
     int id = parseIntField(strtok(nullptr, "|"));
     int x = parseIntField(strtok(nullptr, "|"));
@@ -2373,9 +3233,26 @@ bool processCommand(char *line, Print &reply)
     int w = parseIntField(strtok(nullptr, "|"));
     int h = parseIntField(strtok(nullptr, "|"));
     int state = parseIntField(strtok(nullptr, "|"));
-    uint16_t track = parseColor(strtok(nullptr, "|"), TFT_DARKGREY);
-    uint16_t thumb = parseColor(strtok(nullptr, "|"), TFT_GREEN);
-    drawSwitch(id, x, y, w, h, state, track, thumb);
+        char *strokeText = strtok(nullptr, "|");
+    char *thumbText = strtok(nullptr, "|");
+    char *fillText = strtok(nullptr, "|");
+    char *elementText = strtok(nullptr, "|");
+    char *lineText = strtok(nullptr, "|");
+    uint16_t outline = parseColor(strokeText, TFT_DARKGREY);
+    uint16_t thumb = parseColor(thumbText, TFT_GREEN);
+    uint16_t track;
+    uint16_t element;
+    int lineWidth;
+    if (lineText != nullptr) {
+      track = parseColor(fillText, TFT_DARKGREY);
+      element = parseColor(elementText, lightenRgb565(thumb, 45));
+      lineWidth = parseIntField(lineText, 1);
+    } else {
+      track = outline;
+      element = parseColor(fillText, lightenRgb565(thumb, 45));
+      lineWidth = 1;
+    }
+    drawSwitch(id, x, y, w, h, state, outline, thumb, track, element, lineWidth);
     storeSceneLine("SW", id, original);
     sendAck(reply, original, true);
     return true;
@@ -2518,10 +3395,11 @@ void setup()
   TJpgDec.setCallback(jpegOutput);
   setBacklight(true);
   drawStartupScreen();
-  setBacklight(true);
+  loadStartupConfig();
   startOta();
+  runStartupScreenScript();
 
-  Serial.println("Commands: ?, HELP, SHOWIP, RESET, SS, TF, SD, LS|path, FS|path, FW|path|size, FD|hex, FDO|offset|hex, FE, SC|path, JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V, BX|id|x|y|w|h|fill|outline|radius|line, RR|id|x|y|w|h|fill|outline|radius|line, TX|id|x|y|text|color|bg|font|w|h|H|V, TW|id|x|y|w|h|title|text|fill|outline, TR|id|x|y|w|h|value|max|track|thumb, PB|id|x|y|w|h|percent|fill|background|outline, CC|id|x|y|diameter|fill|outline|line, SW|id|x|y|w|h|0/1|track|thumb, SB|id|x|y|w|h|H/V|value|max|track|thumb, BM|id|x|y|name|fg|bg|scale");
+  Serial.println("Commands: ?, HELP, SHOWIP, RESET, SS, TF, FL, SD, LS|path, FS|path, FI|path, RM|path, SL, FR|path|offset|len, FW|path|size, FD|hex, FDO|offset|hex, FE, SC|path, JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V, BX|id|x|y|w|h|fill|outline|radius|line, RR|id|x|y|w|h|fill|outline|radius|line, TX|id|x|y|text|color|bg|font|w|h|H|V, TW|id|x|y|w|h|title|text|fill|outline, TR|id|x|y|w|h|value|max|track|thumb|element, VT|id|x|y|w|h|value|max|track|thumb|element, PB|id|x|y|w|h|percent|fill|background|outline, VP|id|x|y|w|h|percent|fill|background|outline, CC|id|x|y|diameter|fill|outline|line, SW|id|x|y|w|h|0/1|stroke|thumb|fill|element|line, SB|id|x|y|w|h|H/V|value|max|track|thumb|element, BM|id|x|y|name|fg|bg|scale");
   sendReady(Serial);
   sendReady(UiSerial);
 }
