@@ -133,7 +133,6 @@ type
     SelectorRoundRect: TImage;
     CheckBox4: TCheckBox;
     ComboBox2: TComboBox;
-    Label28: TLabel;
     ComboBox3: TComboBox;
     Label27: TLabel;
     Label29: TLabel;
@@ -163,6 +162,7 @@ type
     SpinEdit7: TSpinEdit;
     SpinEdit8: TSpinEdit;
     Label5: TLabel;
+    Label28: TLabel;
     procedure FormCreate(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure Button9Click(Sender: TObject);
@@ -3478,17 +3478,18 @@ begin
   HasPicture := HasRow and (Cmd = 'JPG');
   HasText := HasRow and ((Cmd = 'BT') or (Cmd = 'TX'));
 
-  SetControlState(Label3, HasPosition or HasWidth);
   SetControlState(Label1, HasPosition);
   SetControlState(Label4, HasPosition);
   SetControlState(SpinEdit1, HasPosition);
   SetControlState(SpinEdit2, HasPosition);
 
-  SetControlState(Label5, HasWidth);
   SetControlState(Label6, HasWidth);
   SetControlState(Label7, HasHeight);
   SetControlState(SpinEdit3, HasWidth);
   SetControlState(SpinEdit4, HasHeight);
+
+  SetControlState(Label3, HasPicture);
+  SetControlState(Label5, HasPicture);
 
   SetControlState(Label14, HasRound);
   SetControlState(SpinEdit5, HasRound);
@@ -3496,7 +3497,8 @@ begin
   SetControlState(Label16, HasValue);
   SetControlState(SpinEdit6, HasValue);
 
-  SetControlState(Label23, HasLine);
+  Label23.Visible := False;
+  SetControlState(Label28, HasLine);
   SetControlState(FLineTrackLabel, HasLine);
   SetControlState(FLineTrack, HasLine);
 
@@ -3504,12 +3506,15 @@ begin
   SetControlState(FFontListLabel, HasFont);
   SetControlState(FFontList, HasFont);
   SetControlState(Button9, HasFont);
+  SetControlState(Label27, HasAlign);
+  SetControlState(Label29, HasAlign);
   SetControlState(ComboBox2, HasAlign);
   SetControlState(ComboBox3, HasAlign);
+  SetControlState(Label17, HasText);
   SetControlState(Edit4, HasText);
 
-  SetControlState(Button3, True);
-  SetControlState(Button13, True);
+  SetControlState(Button3, HasPicture);
+  SetControlState(Button13, HasPicture);
   SetControlState(CheckBox4, HasPicture);
   SetControlState(Label36, HasPicture);
   SetControlState(ComboBox6, HasPicture);
