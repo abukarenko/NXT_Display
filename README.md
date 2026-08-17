@@ -87,6 +87,204 @@ Colors are RGB565 values. Decimal values and hexadecimal values such as `0x001F`
 
 Most successful drawing commands reply with `OK|<original command>`. An unknown command replies with `ERR|<original command>`.
 
+### Protocol parameter reference
+
+The display runs in landscape orientation with a logical drawing area of **480 × 320 pixels**. The origin is the upper-left corner.
+
+```text
+(0,0) --------------------------> X
+  |
+  |
+  |
+  v
+  Y
+```
+
+Coordinates are expressed in pixels. For normal on-screen objects:
+
+- `x` — left edge of an object.
+- `y` — top edge of an object.
+- `w` — object width.
+- `h` — object height.
+- `diameter` — circle diameter.
+
+Typical visible ranges are `x = 0..479` and `y = 0..319`. Width and height should normally keep the object inside the 480 × 320 drawing area. The parser does not require every object to remain fully inside the screen, so the sender should perform layout validation when necessary.
+
+#### Object ID
+
+Most GUI objects contain an integer `id` field:
+
+```text
+COMMAND|id|...
+```
+
+The ID identifies an object inside its command/control type. Sending the same type and the same ID again replaces its registered definition and redraws it at the new position/value.
+
+Example:
+
+```text
+TX|5|20|20|RPM 1000|0xFFFF|0x0000|2
+TX|5|20|20|RPM 1250|0xFFFF|0x0000|2
+```
+
+The second `TX|5` becomes the current scene definition for text object 5. This is important for the `SS` scene snapshot command.
+
+For interactive controls, IDs are also included in returned touch events:
+
+```text
+EV|BT|3|CLICK|150|270
+EV|TR|2|CHANGE|67|220|180
+```
+
+#### RGB565 colors
+
+Colors use a 16-bit RGB565 value:
+
+```text
+RRRRRGGGGGGBBBBB
+```
+
+Common values:
+
+| Color | RGB565 |
+| --- | --- |
+| Black | `0x0000` |
+| White | `0xFFFF` |
+| Red | `0xF800` |
+| Green | `0x07E0` |
+| Blue | `0x001F` |
+| Yellow | `0xFFE0` |
+| Cyan | `0x07FF` |
+| Magenta | `0xF81F` |
+
+Values may be sent in hexadecimal or decimal form:
+
+```text
+CL|0x001F
+CL|31
+```
+
+Both commands select the same blue RGB565 color.
+
+`0x0001` has a special meaning in commands that support transparency. It means **do not paint the background/fill** rather than drawing color value 1.
+
+Examples:
+
+```text
+TX|1|20|20|Transparent text|0xFFFF|0x0001|2
+BX|1|10|10|100|40|0x0001|0xFFFF|0|2
+CC|1|200|100|50|0x0001|0xFFFF|2
+```
+
+#### Fonts
+
+The `font` field uses IDs `1..9`:
+
+| ID | Font |
+| --- | --- |
+| `1` | FreeSans6 |
+| `2` | FreeSans8 |
+| `3` | FreeSans10 |
+| `4` | FreeSans12 |
+| `5` | FreeMono12 |
+| `6` | FreeSansBold12 |
+| `7` | FreeSansBold14 |
+| `8` | FreeSansBold16 |
+| `9` | FreeSansBold18 |
+
+Example:
+
+```text
+TX|1|20|20|Small|0xFFFF|0x0000|1
+TX|2|20|60|Large|0xFFFF|0x0000|9
+```
+
+Use `TF` on the display to see samples of the installed fonts.
+
+#### Text alignment
+
+Commands `BT` and `TX` can use horizontal and vertical alignment fields.
+
+Horizontal `H`:
+
+| Value | Meaning |
+| --- | --- |
+| `L` | Left |
+| `C` | Center |
+| `R` | Right |
+
+Vertical `V`:
+
+| Value | Meaning |
+| --- | --- |
+| `T` | Top |
+| `C` | Center |
+| `B` | Bottom |
+
+Example — centered text inside a 160 × 40 area:
+
+```text
+TX|10|20|100|CENTER|0xFFFF|0x0000|4|160|40|C|C
+```
+
+For `TX`, if `w` and `h` are omitted/zero, the supplied `x,y` act as the text origin. When a box size is supplied, alignment is applied inside that box.
+
+#### Line width and radius
+
+`line` controls outline thickness where supported. The current renderer constrains line width to a small practical range; values `1..4` should be used.
+
+`radius` controls the corner radius for `BX`/`RR`:
+
+```text
+BX|1|20|20|120|50|0x001F|0xFFFF|0|1
+RR|2|20|80|120|50|0x001F|0xFFFF|10|2
+```
+
+`radius=0` produces square corners. A larger value produces rounded corners.
+
+#### Value, maximum and percent
+
+`TR` and `SB` use `value` plus `max`:
+
+```text
+TR|1|40|100|200|28|25|100|0x4208|0xFFE0
+```
+
+Here the track bar value is 25 of 100. Values are constrained by the renderer to `0..max`; a non-positive maximum is internally replaced with a usable minimum.
+
+`PB` uses a percentage:
+
+```text
+PB|1|40|150|200|20|75|0x07E0|0x0000|0xFFFF
+```
+
+This displays 75%.
+
+`SW` uses a binary state:
+
+```text
+SW|1|40|200|70|32|0|0x4208|0x07E0
+SW|1|40|200|70|32|1|0x4208|0x07E0
+```
+
+`0` means off/left, `1` means on/right.
+
+#### Text fields and separator limitation
+
+The pipe character `|` is the protocol field separator. It therefore cannot currently be embedded directly inside ordinary text fields such as `label`, `title` or `text`.
+
+For example, use:
+
+```text
+TX|1|20|20|A / B|0xFFFF|0x0000|2
+```
+
+rather than trying to send `A|B` as one text field.
+
+#### Command length
+
+The firmware command buffer is currently 192 bytes including the terminating zero. Keep an individual command line comfortably below this limit, especially commands containing long text or file paths.
+
 ### System and diagnostics
 
 | Command | Description | Example |
