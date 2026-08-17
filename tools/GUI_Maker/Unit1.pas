@@ -68,7 +68,6 @@ type
     SpinEdit1: TSpinEdit;
     Label1: TLabel;
     SelectorButton: TImage;
-    Label2: TLabel;
     Label4: TLabel;
     SpinEdit2: TSpinEdit;
     SpinEdit3: TSpinEdit;
@@ -163,6 +162,8 @@ type
     SpinEdit8: TSpinEdit;
     Label5: TLabel;
     Label28: TLabel;
+    ProgressBar2: TProgressBar;
+    Button14: TButton;
     procedure FormCreate(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure Button9Click(Sender: TObject);
@@ -235,6 +236,7 @@ type
     procedure InitControls;
     procedure SetStatus(const AText: string);
     procedure SetSdProgress(AValue: Integer);
+    procedure SetImageProgress(AValue: Integer);
     procedure UpdateMainStatusBar;
     procedure AppMessage(var Msg: TMsg; var Handled: Boolean);
     procedure AddPaletteHandlers;
@@ -277,7 +279,8 @@ type
       AProgressLabel: TLabel = nil; AForceOverwrite: Boolean = False): Boolean;
     function RemoteSdFileSize(const ASdPath: string; var ASize: Int64): Boolean;
     function EnsureEspSdFont(AFontId: Integer): Boolean;
-    function UploadImageRowToEsp(ARow: Integer): Boolean;
+    function UploadImageRowToEsp(ARow: Integer;
+      AForceOverwrite: Boolean = False): Boolean;
     function RowRect(ARow: Integer; var ARect: TRect): Boolean;
     procedure AddElement(const AKind: string);
     procedure AddScriptLine(const ALine: string);
@@ -325,7 +328,8 @@ type
     function EnsureUdpSocket(ABroadcast: Boolean): Boolean;
     procedure CloseUdpSocket;
     function UdpExchangeLine(const ALine, AHost: string; ABroadcast: Boolean;
-      var AReply: string; const AExpectedPrefix: string = ''): Boolean;
+      var AReply: string; const AExpectedPrefix: string = '';
+      ATimeoutMs: DWORD = 3000; AShowTimeoutError: Boolean = True): Boolean;
     function ExchangeEspLine(const ALine, AOkPrefix: string; ATimeoutMs: DWORD; var AReply: string): Boolean;
     procedure RefreshSdScriptList;
     function NextSdScriptFileName: string;
@@ -385,6 +389,9 @@ type
     procedure PicturePasteButtonClick(Sender: TObject);
     procedure PortMonitorTimer(Sender: TObject);
     procedure PaletteElementClick(Sender: TObject);
+    procedure PicturePaletteMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+
   public
     function EspExchange(const ALine, AOkPrefix: string; ATimeoutMs: DWORD;
       var AReply: string): Boolean;
@@ -485,6 +492,7 @@ const
 
 var
   PaletteColors: array[0..PALETTE_COLOR_COUNT - 1] of TColor;
+  Numbers: TIntegerArray;
 //======================================================
 // Преобразует имя COM-порта в формат WinAPI для открытия порта.
 function PortWinApiName(const APortName: string): string;
@@ -616,14 +624,20 @@ end;
 //======================================================
 // Настраивает таблицу команд и её колонки.
 procedure TForm1.InitGrid;
+var
+  C: Integer;
 begin
   StringGrid1.ColCount := 19;
   StringGrid1.RowCount := 2;
-  StringGrid1.FixedCols := 1;
-  StringGrid1.FixedRows := 1;
-  StringGrid1.Options := StringGrid1.Options + [goEditing] - [goRangeSelect, goRowSelect];
+  StringGrid1.FixedCols := 0;
+  StringGrid1.FixedRows := 0;
+  StringGrid1.Options := StringGrid1.Options - [goEditing, goRangeSelect] + [goRowSelect];
   StringGrid1.DefaultDrawing := False;
-  StringGrid1.ScrollBars := ssBoth;
+  StringGrid1.ScrollBars := ssVertical;
+  StringGrid1.Font.Name := 'Consolas';
+  StringGrid1.Font.Size := 8;
+  StringGrid1.DefaultRowHeight := 18;
+  StringGrid1.RowHeights[0] := 0;
   StringGrid1.Cells[COL_SEL, 0] := '';
   StringGrid1.Cells[COL_CMD, 0] := 'cmd';
   StringGrid1.Cells[COL_ID, 0] := 'id';
@@ -643,29 +657,15 @@ begin
   StringGrid1.Cells[COL_SRCY, 0] := 'sy';
   StringGrid1.Cells[COL_SRCW, 0] := 'sw';
   StringGrid1.Cells[COL_SRCH, 0] := 'sh';
-  StringGrid1.ColWidths[COL_SEL] := 18;
-  StringGrid1.ColWidths[COL_CMD] := 44;
-  StringGrid1.ColWidths[COL_ID] := 28;
-  StringGrid1.ColWidths[COL_X] := 38;
-  StringGrid1.ColWidths[COL_Y] := 38;
-  StringGrid1.ColWidths[COL_W] := 38;
-  StringGrid1.ColWidths[COL_H] := 38;
-  StringGrid1.ColWidths[COL_TEXT] := 92;
-  StringGrid1.ColWidths[COL_C1] := 68;
-  StringGrid1.ColWidths[COL_C2] := 68;
-  StringGrid1.ColWidths[COL_EXTRA] := 58;
-  StringGrid1.ColWidths[COL_LINE] := 36;
-  StringGrid1.ColWidths[COL_FONT] := 38;
-  StringGrid1.ColWidths[COL_HALIGN] := 28;
-  StringGrid1.ColWidths[COL_VALIGN] := 28;
-  StringGrid1.ColWidths[COL_SRCX] := 38;
-  StringGrid1.ColWidths[COL_SRCY] := 38;
-  StringGrid1.ColWidths[COL_SRCW] := 38;
-  StringGrid1.ColWidths[COL_SRCH] := 38;
+  StringGrid1.ColWidths[COL_SEL] := 12;
+  StringGrid1.ColWidths[COL_CMD] := 30;
+  StringGrid1.ColWidths[COL_ID] := 445;
+  for C := COL_X to StringGrid1.ColCount - 1 do
+    StringGrid1.ColWidths[C] := 0;
   StringGrid1.OnSelectCell := GridSelectCell;
   StringGrid1.OnMouseDown := GridMouseDown;
   StringGrid1.OnDrawCell := GridDrawCell;
-  StringGrid1.OnSetEditText := GridSetEditText;
+  StringGrid1.OnSetEditText := nil;
 end;
 
 //======================================================
@@ -804,6 +804,7 @@ begin
   if Assigned(Button13) then
     Button13.OnClick := PicturePasteButtonClick;
   Button12.OnClick := ShowIpButtonClick;
+  Button14.OnClick := ApplyThemeAllMenuClick;
   Shape6.OnMouseDown := ColorFieldMouseDown;
   Shape7.OnMouseDown := ColorFieldMouseDown;
   Shape8.OnMouseDown := ColorFieldMouseDown;
@@ -842,6 +843,9 @@ begin
   ProgressBar1.Min := 0;
   ProgressBar1.Max := 100;
   ProgressBar1.Position := 0;
+  ProgressBar2.Min := 0;
+  ProgressBar2.Max := 100;
+  ProgressBar2.Position := 0;
   ComboBox5.Style := csDropDownList;
   ComboBox5.Items.Clear;
   ComboBox5.Items.Add('Neon');
@@ -972,6 +976,19 @@ begin
     AValue := 100;
   ProgressBar1.Position := AValue;
   ProgressBar1.Update;
+end;
+
+//======================================================
+procedure TForm1.SetImageProgress(AValue: Integer);
+begin
+  if not Assigned(ProgressBar2) then
+    Exit;
+  if AValue < 0 then
+    AValue := 0;
+  if AValue > 100 then
+    AValue := 100;
+  ProgressBar2.Position := AValue;
+  ProgressBar2.Update;
 end;
 
 //======================================================
@@ -1195,6 +1212,19 @@ end;
 // Привязывает элементы палитры компонентов к обработчикам добавления.
 procedure TForm1.AddPaletteHandlers;
 begin
+  SelectorButton.SetBounds(SelectorButton.Left, SelectorButton.Top, 40, 24);
+  SelectorText.SetBounds(SelectorText.Left, SelectorText.Top, 40, 24);
+  SelectorSwitch.SetBounds(SelectorSwitch.Left, SelectorSwitch.Top, 40, 24);
+  SelectorProgress.SetBounds(SelectorProgress.Left, SelectorProgress.Top, 40, 24);
+  SelectorSlider.SetBounds(SelectorSlider.Left, SelectorSlider.Top, 40, 24);
+  SelectorBox.SetBounds(SelectorBox.Left, SelectorBox.Top, 40, 24);
+  SelectorRoundRect.SetBounds(SelectorRoundRect.Left, SelectorRoundRect.Top, 40, 24);
+  SelectorCircle.SetBounds(SelectorCircle.Left, SelectorCircle.Top, 40, 40);
+  Image4.SetBounds(Image4.Left, Image4.Top, 64, 64);
+  Image4.Stretch := True;
+  Image4.Proportional := True;
+  Image4.Center := True;
+
   SelectorButton.Hint := 'BT';
   SelectorText.Hint := 'TX';
   SelectorSwitch.Hint := 'SW';
@@ -1203,6 +1233,9 @@ begin
   SelectorBox.Hint := 'BX';
   SelectorRoundRect.Hint := 'RR';
   SelectorCircle.Hint := 'CC';
+  Image4.Hint := 'JPG';
+  Image4.ShowHint := True;
+  Image4.Cursor := crHandPoint;
   Label10.Hint := 'BT';
   Label11.Hint := 'TR';
   Label12.Hint := 'JPG';
@@ -1221,6 +1254,8 @@ begin
   SelectorBox.OnClick := PaletteElementClick;
   SelectorRoundRect.OnClick := PaletteElementClick;
   SelectorCircle.OnClick := PaletteElementClick;
+  Image4.OnClick := nil;
+  Image4.OnMouseDown := PicturePaletteMouseDown;
   Label10.OnClick := PaletteElementClick;
   Label11.OnClick := PaletteElementClick;
   Label12.OnClick := PaletteElementClick;
@@ -1230,6 +1265,7 @@ begin
   Label21.OnClick := PaletteElementClick;
   Label22.OnClick := PaletteElementClick;
   Label26.OnClick := PaletteElementClick;
+  RefreshComponentPaletteImages;
 end;
 
 //======================================================
@@ -1646,7 +1682,7 @@ var
   BitmapBlock: string;
   GlyphBlock: string;
   FontBlock: string;
-  Numbers: TIntegerArray;
+ // Numbers: TIntegerArray;
   I: Integer;
   G: Integer;
 begin
@@ -2749,6 +2785,8 @@ label
   RestartTransfer;
 const
   CHUNK_SIZE = 64;
+  UDP_CHUNK_SIZE = 48;
+  UDP_BLOCK_DELAY_MS = 8;
 var
   Stream: TFileStream;
   Buffer: array[0..CHUNK_SIZE - 1] of Byte;
@@ -2763,6 +2801,15 @@ var
   UseUdp: Boolean;
   ChannelName: string;
   RemoteSize: Int64;
+  BlockSize: Integer;
+
+  procedure SetTransferProgress(AValue: Integer);
+  begin
+    if Pos('/images/', LowerCase(ASdPath)) = 1 then
+      SetImageProgress(AValue)
+    else
+      SetSdProgress(AValue);
+  end;
 
 //======================================================
 // После таймаута UDP заново начинает весь файл через открытый COM.
@@ -2790,19 +2837,29 @@ var
   function SendUploadLine(const ALine, AOkPrefix: string; ATimeoutMs: DWORD): Boolean;
   var
     Attempt: Integer;
+    ReplyMatches: Boolean;
   begin
    // Result := False;
     if UseUdp then
     begin
       for Attempt := 1 to 3 do
       begin
-        Result := UdpExchangeLine(ALine, Trim(Edit2.Text), False, ReplyLine);
-        if Result and (Pos(AOkPrefix, ReplyLine) = 1) then
+        Result := UdpExchangeLine(ALine, Trim(Edit2.Text), False, ReplyLine,
+          AOkPrefix, ATimeoutMs, False);
+        if Pos('OK|FDO|', UpperCase(AOkPrefix)) = 1 then
+          ReplyMatches := CompareText(AOkPrefix, ReplyLine) = 0
+        else
+          ReplyMatches := Pos(AOkPrefix, ReplyLine) = 1;
+        if Result and ReplyMatches then
+          Exit;
+        if Pos('ERR|', UpperCase(ReplyLine)) = 1 then
           Exit;
         SetStatus('UDP retry ' + IntToStr(Attempt) + ': ' + ReplyLine);
         if Assigned(Form4) and Assigned(Form4.Memo1) then Form4.Memo1.Update;
         Sleep(30);
       end;
+      if not Result then
+        ShowErrorPopup('UDP upload failed after 3 retries: ' + ASdPath);
     end
     else
     begin
@@ -2837,7 +2894,7 @@ var
 
 begin
   Result := False;
-  SetSdProgress(0);
+  SetTransferProgress(0);
   UseUdp := UdpEnabled;
   if UseUdp then
     ChannelName := 'UDP'
@@ -2877,8 +2934,7 @@ begin
     if RemoteFileExists(RemoteSize) then
     begin
       if AForceOverwrite or
-        ((Pos('/fonts/', LowerCase(ASdPath)) = 1) and Assigned(CheckBox6) and CheckBox6.Checked) or
-        ((Pos('/fonts/', LowerCase(ASdPath)) <> 1) and CheckBox4.Enabled and CheckBox4.Checked) then
+        ((Pos('/fonts/', LowerCase(ASdPath)) = 1) and Assigned(CheckBox6) and CheckBox6.Checked) then
       begin
         SetStatus('SD upload overwrite: ' + ASdPath);
         if Assigned(Form4) and Assigned(Form4.Memo1) then Form4.Memo1.Update;
@@ -2891,7 +2947,7 @@ begin
           AProgressLabel.Caption := '100%';
           AProgressLabel.Update;
         end;
-        SetSdProgress(100);
+        SetTransferProgress(100);
         if Assigned(Form4) and Assigned(Form4.Memo1) then Form4.Memo1.Update;
         Result := True;
         Exit;
@@ -2901,7 +2957,11 @@ begin
 RestartTransfer:
     Stream.Position := 0;
     Sent := 0;
-    SetSdProgress(0);
+    if UseUdp then
+      BlockSize := UDP_CHUNK_SIZE
+    else
+      BlockSize := CHUNK_SIZE;
+    SetTransferProgress(0);
     if Assigned(AProgressLabel) then
     begin
       AProgressLabel.Caption := '0%';
@@ -2916,7 +2976,7 @@ RestartTransfer:
     end;
 
     repeat
-      ReadCount := Stream.Read(Buffer, SizeOf(Buffer));
+      ReadCount := Stream.Read(Buffer, BlockSize);
       if ReadCount > 0 then
       begin
         if UseUdp then
@@ -2926,7 +2986,7 @@ RestartTransfer:
         for I := 0 to ReadCount - 1 do
           HexLine := HexLine + HexByte(Buffer[I]);
         if UseUdp then
-          ExpectedPrefix := 'OK|FDO|'
+          ExpectedPrefix := 'OK|FDO|' + IntToStr(Sent + ReadCount)
         else
           ExpectedPrefix := 'OK|FD|';
         if not SendUploadLine(HexLine, ExpectedPrefix, 3000) then
@@ -2941,7 +3001,7 @@ RestartTransfer:
           Percent := Sent * 100 div Stream.Size
         else
           Percent := 100;
-        SetSdProgress(Percent);
+        SetTransferProgress(Percent);
         SetStatus('SD upload ' + IntToStr(Percent) + '%: ' + ASdPath +
           ' ' + IntToStr(Sent) + '/' + IntToStr(Stream.Size));
         if Assigned(AProgressLabel) then
@@ -2951,6 +3011,8 @@ RestartTransfer:
         end;
         if Assigned(Form4) and Assigned(Form4.Memo1) then Form4.Memo1.Update;
         Application.ProcessMessages;
+        if UseUdp then
+          Sleep(UDP_BLOCK_DELAY_MS);
       end;
     until ReadCount = 0;
 
@@ -2961,7 +3023,7 @@ RestartTransfer:
       SetStatus('SD upload finish failed: ' + ReplyLine);
       Exit;
     end;
-    SetSdProgress(100);
+    SetTransferProgress(100);
     SetStatus('SD upload done: ' + ASdPath);
     if Assigned(AProgressLabel) then
     begin
@@ -2979,7 +3041,8 @@ end;
 
 //======================================================
 // Загружает файл JPG для выбранной строки, если это требуется.
-function TForm1.UploadImageRowToEsp(ARow: Integer): Boolean;
+function TForm1.UploadImageRowToEsp(ARow: Integer;
+  AForceOverwrite: Boolean): Boolean;
 var
   Cmd: string;
   SdPath: string;
@@ -3000,7 +3063,7 @@ begin
   end;
   SdPath := Trim(StringGrid1.Cells[COL_TEXT, ARow]);
   LocalFileName := LocalImagePathFromCommandPath(SdPath);
-  Result := SendFileToEspSd(LocalFileName, SdPath);
+  Result := SendFileToEspSd(LocalFileName, SdPath, nil, AForceOverwrite);
   if Result and (Trim(StringGrid1.Cells[COL_TEXT, ARow]) <> SdPath) then
   begin
     StringGrid1.Cells[COL_TEXT, ARow] := SdPath;
@@ -3086,10 +3149,7 @@ begin
 
   if AKind = 'BT' then
   begin
-    if Trim(Edit4.Text) <> '' then
-      StringGrid1.Cells[COL_TEXT, R] := Edit4.Text
-    else
-      StringGrid1.Cells[COL_TEXT, R] := 'Button';
+    StringGrid1.Cells[COL_TEXT, R] := 'Button';
     StringGrid1.Cells[COL_C1, R] := FDefaultBgRgb;
     StringGrid1.Cells[COL_C2, R] := FDefaultLineRgb;
     StringGrid1.Cells[COL_EXTRA, R] := FDefaultFgRgb;
@@ -3097,10 +3157,7 @@ begin
   end
   else if AKind = 'TX' then
   begin
-    if Trim(Edit4.Text) <> '' then
-      StringGrid1.Cells[COL_TEXT, R] := Edit4.Text
-    else
-      StringGrid1.Cells[COL_TEXT, R] := 'Text';
+    StringGrid1.Cells[COL_TEXT, R] := 'Text';
     StringGrid1.Cells[COL_W, R] := '100';
     StringGrid1.Cells[COL_H, R] := '30';
     StringGrid1.Cells[COL_C1, R] := FDefaultFgRgb;
@@ -4903,7 +4960,7 @@ begin
   if UdpEnabled then
   begin
     Result := UdpExchangeLine(ALine, Trim(Edit2.Text), False, AReply,
-      AOkPrefix);
+      AOkPrefix, ATimeoutMs);
     if Result and (AOkPrefix <> '') and (Pos(AOkPrefix, AReply) <> 1) then
       Result := False;
     Exit;
@@ -5228,7 +5285,8 @@ end;
 //======================================================
 // Отправляет одну команду по UDP и ожидает ответ ESP.
 function TForm1.UdpExchangeLine(const ALine, AHost: string; ABroadcast: Boolean;
-  var AReply: string; const AExpectedPrefix: string): Boolean;
+  var AReply: string; const AExpectedPrefix: string; ATimeoutMs: DWORD;
+  AShowTimeoutError: Boolean): Boolean;
 var
   Addr: TSockAddrIn;
   FromAddr: TSockAddrIn;
@@ -5243,6 +5301,8 @@ var
 begin
   Result := False;
   AReply := '';
+  if ATimeoutMs < 250 then
+    ATimeoutMs := 250;
 
   HostText := AnsiString(Trim(AHost));
   Port := StrToIntDef(Trim(Edit3.Text), 4210);
@@ -5283,8 +5343,11 @@ begin
       CloseUdpSocket;
       SetUdpStateColor(clGray);
       SetStatus('UDP send error');
-      FUdpLossShown := True;
-      ShowErrorPopup('UDP connection lost: send error');
+      if AShowTimeoutError then
+      begin
+        FUdpLossShown := True;
+        ShowErrorPopup('UDP connection lost: send error');
+      end;
       Exit;
     end;
 
@@ -5310,7 +5373,10 @@ begin
           Continue;
         end;
         if (AExpectedPrefix <> '') and
-          (Pos(AExpectedPrefix, ReceivedLine) <> 1) then
+          (((Pos('OK|FDO|', UpperCase(AExpectedPrefix)) = 1) and
+            (CompareText(AExpectedPrefix, ReceivedLine) <> 0)) or
+           ((Pos('OK|FDO|', UpperCase(AExpectedPrefix)) <> 1) and
+            (Pos(AExpectedPrefix, ReceivedLine) <> 1))) then
         begin
           HandleRxLine(ReceivedLine);
           Continue;
@@ -5321,7 +5387,7 @@ begin
       end;
       Application.ProcessMessages;
       Sleep(10);
-    until GetTickCount - StartedAt > 3000;
+    until GetTickCount - StartedAt > ATimeoutMs;
 
     if Result then
       SetUdpStateColor(clLime)
@@ -5332,9 +5398,12 @@ begin
       SetUdpStateColor(clGray);
       AReply := 'timeout';
       SetStatus('UDP no reply: ' + string(HostText));
-      FUdpLossShown := True;
-      ShowErrorPopup('UDP connection lost: ' + string(HostText) + ':' +
-        IntToStr(Port));
+      if AShowTimeoutError then
+      begin
+        FUdpLossShown := True;
+        ShowErrorPopup('UDP connection lost: ' + string(HostText) + ':' +
+          IntToStr(Port));
+      end;
     end;
   finally
     FUdpBusy := False;
@@ -5622,6 +5691,10 @@ var
   R: Integer;
 begin
   SetStatus('RX: ' + ALine);
+  // FS is an existence check before Upload. A missing file means that it must
+  // be uploaded and is not an error during normal operation.
+  if Pos('ERR|FS|NOT_FOUND|', UpperCase(Trim(ALine))) = 1 then
+    Exit;
   if Pos('ERR|', UpperCase(Trim(ALine))) = 1 then
   begin
     ShowErrorPopup(Trim(ALine));
@@ -6419,11 +6492,15 @@ procedure TForm1.GridDrawCell(Sender: TObject; ACol, ARow: Integer; Rect: TRect;
 var
   Points: array[0..2] of TPoint;
   TextRect: TRect;
+  CellText: string;
 begin
-  if (ARow = 0) or (ACol = COL_SEL) then
+  if (ARow = 0) or (ACol > COL_ID) then
+    Exit;
+
+  if ARow = FSelectedRow then
   begin
-    StringGrid1.Canvas.Brush.Color := clBtnFace;
-    StringGrid1.Canvas.Font.Color := clWindowText;
+    StringGrid1.Canvas.Brush.Color := clHighlight;
+    StringGrid1.Canvas.Font.Color := clHighlightText;
   end
   else
   begin
@@ -6432,26 +6509,34 @@ begin
   end;
 
   StringGrid1.Canvas.FillRect(Rect);
-  StringGrid1.Canvas.Pen.Color := clSilver;
-  StringGrid1.Canvas.Rectangle(Rect.Left, Rect.Top, Rect.Right, Rect.Bottom);
+  StringGrid1.Canvas.Pen.Color := clBtnShadow;
+  StringGrid1.Canvas.MoveTo(Rect.Left, Rect.Bottom - 1);
+  StringGrid1.Canvas.LineTo(Rect.Right, Rect.Bottom - 1);
 
-  if (ACol = COL_SEL) and (ARow > 0) and (ARow = FSelectedRow) and
+  if (ACol = COL_SEL) and (ARow = FSelectedRow) and
     (Trim(StringGrid1.Cells[COL_CMD, ARow]) <> '') then
   begin
-    Points[0] := Point(Rect.Left + 5, Rect.Top + 3);
-    Points[1] := Point(Rect.Left + 5, Rect.Bottom - 4);
-    Points[2] := Point(Rect.Right - 4, Rect.Top + (Rect.Bottom - Rect.Top) div 2);
-    StringGrid1.Canvas.Brush.Color := clBlack;
-    StringGrid1.Canvas.Pen.Color := clBlack;
+    Points[0] := Point(Rect.Left + 3, Rect.Top + 4);
+    Points[1] := Point(Rect.Left + 3, Rect.Bottom - 5);
+    Points[2] := Point(Rect.Right - 3, Rect.Top + (Rect.Bottom - Rect.Top) div 2);
+    StringGrid1.Canvas.Brush.Color := clHighlightText;
+    StringGrid1.Canvas.Pen.Color := clHighlightText;
     StringGrid1.Canvas.Polygon(Points);
     Exit;
   end;
 
-  if ACol <> COL_SEL then
+  if ACol = COL_CMD then
+    CellText := IntToStr(ARow)
+  else if ACol = COL_ID then
+    CellText := ScriptFromRow(ARow)
+  else
+    CellText := '';
+
+  if CellText <> '' then
   begin
     TextRect := Rect;
     InflateRect(TextRect, -3, -1);
-    DrawText(StringGrid1.Canvas.Handle, PChar(StringGrid1.Cells[ACol, ARow]), -1,
+    DrawText(StringGrid1.Canvas.Handle, PChar(CellText), -1,
       TextRect, DT_LEFT or DT_VCENTER or DT_SINGLELINE);
   end;
 end;
@@ -6765,8 +6850,6 @@ begin
   begin
     FontId := Integer(FFontList.Items.Objects[FFontList.ItemIndex]);
     StringGrid1.Cells[COL_FONT, FSelectedRow] := IntToStr(FontId);
-    if FontId >= 100 then
-      EnsureEspSdFont(FontId);
   end;
   Edit1.Text := ScriptFromRow(FSelectedRow);
   RepaintPreview;
@@ -6992,6 +7075,14 @@ var
   R: Integer;
   Line: string;
   Count: Integer;
+  TotalCount: Integer;
+  Cmd: string;
+  ImageKey: string;
+  SelectedImageKey: string;
+  FontKey: string;
+  FontId: Integer;
+  ProcessedImages: TStringList;
+  ProcessedFonts: TStringList;
 begin
   if SerialEnabled and (FPort = INVALID_HANDLE_VALUE) and not UdpEnabled then
   begin
@@ -7010,27 +7101,77 @@ begin
     Exit;
   end;
 
-  Count := 0;
-  EnsureScreenFillRow;
-  for R := 1 to StringGrid1.RowCount - 1 do
-  begin
-    Line := Trim(ScriptFromRow(R));
-    if Line = '' then
-      Continue;
-    if not UploadImageRowToEsp(R) then
-      Exit;
-    Line := Trim(ScriptFromRow(R));
-    if Line = '' then
-      Continue;
-    SendLine(Line);
-    if SerialEnabled and (not UdpEnabled) and (FPort = INVALID_HANDLE_VALUE) then
-      Exit;
-    Inc(Count);
-    Sleep(10);
-    Application.ProcessMessages;
-  end;
+  ProcessedImages := TStringList.Create;
+  ProcessedFonts := TStringList.Create;
+  try
+    Count := 0;
+    EnsureScreenFillRow;
+    TotalCount := 0;
+    for R := 1 to StringGrid1.RowCount - 1 do
+      if Trim(ScriptFromRow(R)) <> '' then
+        Inc(TotalCount);
+    SetSdProgress(0);
+    SelectedImageKey := '';
+    if Assigned(CheckBox4) and CheckBox4.Enabled and CheckBox4.Checked and
+      (FSelectedRow >= 1) and (FSelectedRow < StringGrid1.RowCount) and
+      (UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow])) = 'JPG') then
+    begin
+      SelectedImageKey := LowerCase(Trim(
+        StringGrid1.Cells[COL_TEXT, FSelectedRow]));
+      SelectedImageKey := StringReplace(SelectedImageKey, '\', '/',
+        [rfReplaceAll]);
+    end;
 
-  SetStatus('Upload sent: ' + IntToStr(Count) + ' lines');
+    for R := 1 to StringGrid1.RowCount - 1 do
+    begin
+      Line := Trim(ScriptFromRow(R));
+      if Line = '' then
+        Continue;
+
+      Cmd := UpperCase(Trim(StringGrid1.Cells[COL_CMD, R]));
+      FontId := StrToIntDef(Trim(StringGrid1.Cells[COL_FONT, R]), 0);
+      if FontId >= 100 then
+      begin
+        FontKey := IntToStr(FontId);
+        if ProcessedFonts.IndexOf(FontKey) < 0 then
+        begin
+          if not EnsureEspSdFont(FontId) then
+            Exit;
+          ProcessedFonts.Add(FontKey);
+        end;
+      end;
+      if Cmd = 'JPG' then
+      begin
+        ImageKey := LowerCase(Trim(StringGrid1.Cells[COL_TEXT, R]));
+        ImageKey := StringReplace(ImageKey, '\', '/', [rfReplaceAll]);
+        if ProcessedImages.IndexOf(ImageKey) < 0 then
+        begin
+          if not UploadImageRowToEsp(R,
+            (SelectedImageKey <> '') and (ImageKey = SelectedImageKey)) then
+            Exit;
+          ProcessedImages.Add(ImageKey);
+        end;
+      end;
+
+      Line := Trim(ScriptFromRow(R));
+      if Line = '' then
+        Continue;
+      SendLine(Line);
+      if SerialEnabled and (not UdpEnabled) and (FPort = INVALID_HANDLE_VALUE) then
+        Exit;
+      Inc(Count);
+      if TotalCount > 0 then
+        SetSdProgress(Count * 100 div TotalCount);
+      Sleep(10);
+      Application.ProcessMessages;
+    end;
+
+    SetSdProgress(100);
+    SetStatus('Upload sent: ' + IntToStr(Count) + ' lines');
+  finally
+    ProcessedFonts.Free;
+    ProcessedImages.Free;
+  end;
 end;
 
 
@@ -7060,10 +7201,18 @@ end;
 procedure TForm1.PictureLoadButtonClick(Sender: TObject);
 var
   Dialog: TOpenDialog;
+  SourceJpg: TJPEGImage;
+  EspJpg: TJPEGImage;
+  Bitmap: TBitmap;
+  TargetDir: string;
+  TargetPath: string;
 begin
   if (FSelectedRow < 1) or (FSelectedRow >= StringGrid1.RowCount) or
     (UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow])) <> 'JPG') then
-    AddElement('JPG');
+  begin
+    SetStatus('Select an Image component first');
+    Exit;
+  end;
 
   Dialog := TOpenDialog.Create(Self);
   try
@@ -7072,7 +7221,30 @@ begin
     Dialog.InitialDir := SdRootPath;
     if Dialog.Execute then
     begin
-      StringGrid1.Cells[COL_TEXT, FSelectedRow] := SdCommandPathFromLocalPath(Dialog.FileName);
+      TargetDir := IncludeTrailingPathDelimiter(SdRootPath) + 'images\';
+      ForceDirectories(TargetDir);
+      TargetPath := TargetDir +
+        ChangeFileExt(ExtractFileName(Dialog.FileName), '.jpg');
+
+      SourceJpg := TJPEGImage.Create;
+      EspJpg := TJPEGImage.Create;
+      Bitmap := TBitmap.Create;
+      try
+        SourceJpg.LoadFromFile(Dialog.FileName);
+        Bitmap.Assign(SourceJpg);
+        EspJpg.Assign(Bitmap);
+        EspJpg.CompressionQuality := 90;
+        EspJpg.ProgressiveEncoding := False;
+        EspJpg.Smoothing := True;
+        EspJpg.SaveToFile(TargetPath);
+      finally
+        Bitmap.Free;
+        EspJpg.Free;
+        SourceJpg.Free;
+      end;
+
+      StringGrid1.Cells[COL_TEXT, FSelectedRow] :=
+        SdCommandPathFromLocalPath(TargetPath);
       if Trim(StringGrid1.Cells[COL_EXTRA, FSelectedRow]) = '' then
         StringGrid1.Cells[COL_EXTRA, FSelectedRow] := '1/1'
       else
@@ -7082,9 +7254,8 @@ begin
       LoadInputsFromRow(FSelectedRow);
       StringGrid1.Invalidate;
       RepaintPreview;
-      SetStatus('Image selected: ' + StringGrid1.Cells[COL_TEXT, FSelectedRow]);
-      if FPort <> INVALID_HANDLE_VALUE then
-        UploadImageRowToEsp(FSelectedRow);
+      SetStatus('Image saved locally: ' +
+        StringGrid1.Cells[COL_TEXT, FSelectedRow] + ' (use Upload to send)');
     end;
   finally
     Dialog.Free;
@@ -7120,7 +7291,10 @@ begin
 
   if (FSelectedRow < 1) or (FSelectedRow >= StringGrid1.RowCount) or
     (UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow])) <> 'JPG') then
-    AddElement('JPG');
+  begin
+    SetStatus('Select an Image component first');
+    Exit;
+  end;
 
   Bitmap := TBitmap.Create;
   Cropped := TBitmap.Create;
@@ -7186,9 +7360,7 @@ TargetDir := IncludeTrailingPathDelimiter(SdRootPath) + 'images\';
       RepaintPreview;
 
       SetStatus('Clipboard image saved: ' +
-        StringGrid1.Cells[COL_TEXT, FSelectedRow]);
-      if (FPort <> INVALID_HANDLE_VALUE) or UdpEnabled then
-        UploadImageRowToEsp(FSelectedRow);
+        StringGrid1.Cells[COL_TEXT, FSelectedRow] + ' (use Upload to send)');
     except
       on E: Exception do
         SetStatus('Clipboard paste failed: ' + E.Message);
@@ -7287,13 +7459,16 @@ begin
   else if (Kind = 'PB') and CheckBox7.Checked then
     Kind := 'VP';
 
-  if Kind = 'JPG' then
-  begin
+  AddElement(Kind);
+end;
+
+//======================================================
+// Adds an Image component immediately when the palette picture is pressed.
+procedure TForm1.PicturePaletteMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  if Button = mbLeft then
     AddElement('JPG');
-    PictureLoadButtonClick(Sender);
-  end
-  else
-    AddElement(Kind);
 end;
 
 //======================================================

@@ -56,7 +56,10 @@ constexpr uint8_t SD_CS_PIN = 27;
 constexpr uint32_t SD_SPI_FREQUENCY = 4000000;
 constexpr uint32_t UI_UART_BAUD = 115200;
 constexpr uint16_t GUI_UDP_PORT = 4210;
-constexpr size_t COMMAND_BUFFER_SIZE = 192;
+// Leave headroom for long JPG paths, labels and future UDP commands. The
+// desktop uploader still sends small acknowledged blocks, but normal script
+// lines must not be truncated at the UDP boundary.
+constexpr size_t COMMAND_BUFFER_SIZE = 384;
 constexpr uint16_t TOUCH_THRESHOLD = 250;
 constexpr bool DISPLAY_INVERTED = true;
 constexpr bool TOUCH_INVERT_X = true;

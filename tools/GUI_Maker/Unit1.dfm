@@ -29,13 +29,6 @@ object Form1: TForm1
     Height = 13
     Caption = 'left'
   end
-  object Label2: TLabel
-    Left = 736
-    Top = 28
-    Width = 35
-    Height = 13
-    Caption = 'COLOR'
-  end
   object Label4: TLabel
     Left = 792
     Top = 268
@@ -60,8 +53,8 @@ object Form1: TForm1
   object SelectorSwitch: TImage
     Left = 552
     Top = 172
-    Width = 43
-    Height = 19
+    Width = 40
+    Height = 24
   end
   object Label11: TLabel
     Left = 552
@@ -94,8 +87,8 @@ object Form1: TForm1
   object SelectorCircle: TImage
     Left = 640
     Top = 228
-    Width = 33
-    Height = 33
+    Width = 40
+    Height = 40
   end
   object Label15: TLabel
     Left = 640
@@ -114,8 +107,8 @@ object Form1: TForm1
   object SelectorBox: TImage
     Left = 632
     Top = 92
-    Width = 65
-    Height = 33
+    Width = 40
+    Height = 24
   end
   object Label18: TLabel
     Left = 16
@@ -150,14 +143,14 @@ object Form1: TForm1
   object SelectorSlider: TImage
     Left = 552
     Top = 92
-    Width = 65
-    Height = 13
+    Width = 40
+    Height = 24
   end
   object SelectorProgress: TImage
     Left = 552
     Top = 228
-    Width = 65
-    Height = 12
+    Width = 40
+    Height = 24
   end
   object Label21: TLabel
     Left = 552
@@ -169,8 +162,8 @@ object Form1: TForm1
   object Image4: TImage
     Left = 552
     Top = 324
-    Width = 65
-    Height = 65
+    Width = 64
+    Height = 64
     Picture.Data = {
       0A544A504547496D61676540170000FFD8FFE000104A46494600010101006000
       600000FFE100224578696600004D4D002A000000080001011200030000000100
@@ -460,8 +453,8 @@ object Form1: TForm1
   object SelectorRoundRect: TImage
     Left = 632
     Top = 148
-    Width = 65
-    Height = 33
+    Width = 40
+    Height = 24
   end
   object Label27: TLabel
     Left = 736
@@ -535,14 +528,14 @@ object Form1: TForm1
   object SelectorText: TImage
     Left = 632
     Top = 44
-    Width = 65
-    Height = 25
+    Width = 40
+    Height = 24
   end
   object SelectorButton: TImage
     Left = 552
     Top = 44
-    Width = 65
-    Height = 25
+    Width = 40
+    Height = 24
   end
   object Label36: TLabel
     Left = 864
@@ -555,14 +548,14 @@ object Form1: TForm1
     Left = 736
     Top = 311
     Width = 36
-    Height = 12
+    Height = 13
     Caption = 'Ofset X'
   end
   object Label5: TLabel
     Left = 792
     Top = 311
     Width = 36
-    Height = 12
+    Height = 13
     Caption = 'Ofset Y'
   end
   object Label28: TLabel
@@ -974,9 +967,9 @@ object Form1: TForm1
     TabOrder = 43
   end
   object ComboBox5: TComboBox
-    Left = 808
+    Left = 736
     Top = 16
-    Width = 145
+    Width = 113
     Height = 21
     ItemHeight = 13
     TabOrder = 45
@@ -992,10 +985,10 @@ object Form1: TForm1
     OnClick = Button18Click
   end
   object ProgressBar1: TProgressBar
-    Left = 8
+    Left = 16
     Top = 712
     Width = 697
-    Height = 9
+    Height = 12
     TabOrder = 44
   end
   object ComboBox6: TComboBox
@@ -1031,6 +1024,21 @@ object Form1: TForm1
     MinValue = 0
     TabOrder = 48
     Value = 0
+  end
+  object ProgressBar2: TProgressBar
+    Left = 552
+    Top = 416
+    Width = 137
+    Height = 12
+    TabOrder = 49
+  end
+  object Button14: TButton
+    Left = 864
+    Top = 8
+    Width = 153
+    Height = 25
+    Caption = 'Assign to all'
+    TabOrder = 50
   end
   object ColorDialog1: TColorDialog
     Left = 416

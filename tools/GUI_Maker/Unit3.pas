@@ -504,12 +504,12 @@ end;
 // Синхронизирует строку таблицы с параметрами элемента.
 procedure TForm3.RenderSelectionToBitmap(ABitmap: TBitmap);
 var
-  DestRect: TRect;
+  SourceBitmap: TBitmap;
+  SourceRect: TRect;
 begin
   if ABitmap = nil then
     Exit;
   NormalizeSelection;
-  UpdateViewRect;
   ABitmap.PixelFormat := pf24bit;
   ABitmap.Width := FSelW;
   ABitmap.Height := FSelH;
@@ -517,9 +517,19 @@ begin
   ABitmap.Canvas.FillRect(Rect(0, 0, ABitmap.Width, ABitmap.Height));
   if (FPicture.Graphic = nil) or FPicture.Graphic.Empty then
     Exit;
-  DestRect := Rect(FViewRect.Left - FSelX, FViewRect.Top - FSelY,
-    FViewRect.Right - FSelX, FViewRect.Bottom - FSelY);
-  ABitmap.Canvas.StretchDraw(DestRect, FPicture.Graphic);
+
+  SourceBitmap := TBitmap.Create;
+  try
+    SourceBitmap.PixelFormat := pf24bit;
+    SourceBitmap.Width := FPicture.Width;
+    SourceBitmap.Height := FPicture.Height;
+    SourceBitmap.Canvas.Draw(0, 0, FPicture.Graphic);
+    SourceRect := Rect(FSelX, FSelY, FSelX + FSelW, FSelY + FSelH);
+    ABitmap.Canvas.CopyRect(Rect(0, 0, FSelW, FSelH),
+      SourceBitmap.Canvas, SourceRect);
+  finally
+    SourceBitmap.Free;
+  end;
 end;
 
 //======================================================
