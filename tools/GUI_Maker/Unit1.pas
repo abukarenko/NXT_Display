@@ -63,33 +63,31 @@ type
     Bevel1: TBevel;
     ComboBox1: TComboBox;
     Button2: TButton;
-    StaticText1: TStaticText;
+    SelectorText: TImage;
     ColorGrid1: TColorGrid;
     SpinEdit1: TSpinEdit;
     Label1: TLabel;
-    StaticText2: TStaticText;
+    SelectorButton: TImage;
     Label2: TLabel;
-    Label3: TLabel;
     Label4: TLabel;
     SpinEdit2: TSpinEdit;
-    Label5: TLabel;
     SpinEdit3: TSpinEdit;
     Label6: TLabel;
     Label7: TLabel;
     SpinEdit4: TSpinEdit;
-    Image1: TImage;
+    SelectorSwitch: TImage;
     Label11: TLabel;
     Label12: TLabel;
     Label13: TLabel;
     SpinEdit5: TSpinEdit;
     Label14: TLabel;
-    Shape2: TShape;
+    SelectorCircle: TImage;
     Label15: TLabel;
     Label16: TLabel;
     SpinEdit6: TSpinEdit;
     StringGrid1: TStringGrid;
     Button3: TButton;
-    Shape3: TShape;
+    SelectorBox: TImage;
     Label18: TLabel;
     Edit1: TEdit;
     CheckBox1: TCheckBox;
@@ -100,8 +98,8 @@ type
     Shape4: TShape;
     Button1: TButton;
     Label20: TLabel;
-    Image2: TImage;
-    Image3: TImage;
+    SelectorSlider: TImage;
+    SelectorProgress: TImage;
     Label21: TLabel;
     Image4: TImage;
     Label10: TLabel;
@@ -132,7 +130,7 @@ type
     Shape9: TShape;
     Label25: TLabel;
     Label26: TLabel;
-    Shape10: TShape;
+    SelectorRoundRect: TImage;
     CheckBox4: TCheckBox;
     ComboBox2: TComboBox;
     Label28: TLabel;
@@ -145,11 +143,8 @@ type
     Label30: TLabel;
     Shape11: TShape;
     CheckBox5: TCheckBox;
-    Button14: TButton;
     ComboBox4: TComboBox;
     Label31: TLabel;
-    Button15: TButton;
-    SpeedButton1: TSpeedButton;
     Button16: TButton;
     Button17: TButton;
     CheckBox6: TCheckBox;
@@ -158,6 +153,16 @@ type
     ComboBox5: TComboBox;
     Button18: TButton;
     ProgressBar1: TProgressBar;
+    Label32: TLabel;
+    Label33: TLabel;
+    Label34: TLabel;
+    Label35: TLabel;
+    ComboBox6: TComboBox;
+    Label36: TLabel;
+    Label3: TLabel;
+    SpinEdit7: TSpinEdit;
+    SpinEdit8: TSpinEdit;
+    Label5: TLabel;
     procedure FormCreate(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure Button9Click(Sender: TObject);
@@ -166,6 +171,7 @@ type
     procedure Button17Click(Sender: TObject);
     procedure OrientationCheckClick(Sender: TObject);
     procedure ColorThemeChange(Sender: TObject);
+    procedure JpgScaleComboChange(Sender: TObject);
     procedure FormDblClick(Sender: TObject);
     procedure Button18Click(Sender: TObject);
   private
@@ -306,6 +312,8 @@ type
     function ColorFieldAppliesToCommand(AField: TColorField; const ACmd: string): Boolean;
     procedure SetActiveColorField(AField: TColorField);
     procedure RefreshColorFieldShapes;
+    procedure DrawComponentPaletteImage(AImage: TImage; const AKind: string);
+    procedure RefreshComponentPaletteImages;
     procedure EnsureNoColorLabels;
     procedure ApplyPaletteColorToActiveField(const ARgb: string; AColor: TColor);
     procedure ColorFieldMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
@@ -372,7 +380,6 @@ type
     procedure PicturePasteButtonClick(Sender: TObject);
     procedure PortMonitorTimer(Sender: TObject);
     procedure PaletteElementClick(Sender: TObject);
-    procedure PaletteShapeMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
   public
     function EspExchange(const ALine, AOkPrefix: string; ATimeoutMs: DWORD;
       var AReply: string): Boolean;
@@ -766,6 +773,10 @@ begin
   SpinEdit4.MaxValue := 320;
   SpinEdit5.MaxValue := 80;
   SpinEdit6.MaxValue := 100;
+  SpinEdit7.MaxValue := 10000;
+  SpinEdit8.MaxValue := 10000;
+  SpinEdit7.OnChange := InputSpinChange;
+  SpinEdit8.OnChange := InputSpinChange;
   SpinEdit5.OnChange := InputSpinChange;
   SpinEdit6.OnChange := InputSpinChange;
   if Edit4.Text = 'Edit4' then
@@ -815,9 +826,6 @@ begin
   CheckBox3.OnClick := UdpCheckClick;
   CheckBox7.OnClick := OrientationCheckClick;
   CheckBox8.OnClick := OrientationCheckClick;
-  Button14.Visible := False;
-  Button15.Visible := False;
-  SpeedButton1.Visible := False;
   ComboBox4.Style := csDropDownList;
   ComboBox4.Items.Clear;
   ComboBox4.ItemIndex := -1;
@@ -835,6 +843,15 @@ begin
   ComboBox5.Items.Add('Ocean');
   ComboBox5.ItemIndex := 1;
   ComboBox5.OnChange := ColorThemeChange;
+  ComboBox6.Style := csDropDownList;
+  ComboBox6.Items.Clear;
+  ComboBox6.Items.Add('1/4');
+  ComboBox6.Items.Add('1/2');
+  ComboBox6.Items.Add('1/1');
+  ComboBox6.Items.Add('2/1');
+  ComboBox6.Items.Add('4/1');
+  ComboBox6.ItemIndex := ComboBox6.Items.IndexOf('1/1');
+  ComboBox6.OnChange := JpgScaleComboChange;
 
   if FindComponent('Button8') is TButton then
     FClearLcdButton := TButton(FindComponent('Button8'))
@@ -990,17 +1007,160 @@ begin
     ' | ' + ThemeText;
 end;
 //======================================================
+// Draws a live theme-colored component sample into a palette image.
+procedure TForm1.DrawComponentPaletteImage(AImage: TImage; const AKind: string);
+var
+  B: TBitmap;
+  R: TRect;
+  Kind: string;
+  LineColor: TColor;
+  TextColor: TColor;
+  FillColor: TColor;
+  ElementColor: TColor;
+  ScreenColor: TColor;
+  MidX: Integer;
+  MidY: Integer;
+  Radius: Integer;
+  S: string;
+
+  procedure FillSampleRect(const ARect: TRect; AColor: TColor);
+  begin
+    B.Canvas.Brush.Style := bsSolid;
+    B.Canvas.Brush.Color := AColor;
+    B.Canvas.FillRect(ARect);
+  end;
+
+begin
+  if not Assigned(AImage) then
+    Exit;
+  B := TBitmap.Create;
+  try
+    B.PixelFormat := pf24bit;
+    B.Width := AImage.Width;
+    B.Height := AImage.Height;
+    ScreenColor := Rgb565ToColor(FDefaultLcdBgRgb, clBlack);
+    LineColor := Rgb565ToColor(FDefaultLineRgb, clWhite);
+    TextColor := Rgb565ToColor(FDefaultFgRgb, clWhite);
+    FillColor := Rgb565ToColor(FDefaultBgRgb, ScreenColor);
+    ElementColor := Rgb565ToColor(FDefaultElementRgb, clLime);
+    FillSampleRect(Rect(0, 0, B.Width, B.Height), ScreenColor);
+    R := Rect(1, 1, B.Width - 1, B.Height - 1);
+    Kind := UpperCase(AKind);
+
+    B.Canvas.Pen.Style := psSolid;
+    B.Canvas.Pen.Width := 1;
+    B.Canvas.Pen.Color := LineColor;
+    B.Canvas.Brush.Style := bsSolid;
+    B.Canvas.Brush.Color := FillColor;
+
+    if Kind = 'BT' then
+    begin
+      B.Canvas.RoundRect(R.Left, R.Top, R.Right, R.Bottom, 8, 8);
+      B.Canvas.Font.Color := TextColor;
+      B.Canvas.Font.Style := [fsBold];
+      S := 'Button';
+      B.Canvas.TextOut((B.Width - B.Canvas.TextWidth(S)) div 2,
+        (B.Height - B.Canvas.TextHeight(S)) div 2, S);
+    end
+    else if Kind = 'TX' then
+    begin
+      if not IsNoColorRgb(FDefaultBgRgb) then
+        FillSampleRect(R, FillColor);
+      B.Canvas.Font.Color := TextColor;
+      B.Canvas.Font.Style := [fsBold];
+      S := 'Text';
+      B.Canvas.TextOut((B.Width - B.Canvas.TextWidth(S)) div 2,
+        (B.Height - B.Canvas.TextHeight(S)) div 2, S);
+    end
+    else if Kind = 'SW' then
+    begin
+      InflateRect(R, -2, -4);
+      B.Canvas.RoundRect(R.Left, R.Top, R.Right, R.Bottom, 16, 16);
+      Radius := (R.Bottom - R.Top - 4) div 2;
+      MidY := (R.Top + R.Bottom) div 2;
+      MidX := R.Right - Radius - 2;
+      B.Canvas.Brush.Color := ElementColor;
+      B.Canvas.Pen.Color := ElementColor;
+      B.Canvas.Ellipse(MidX - Radius, MidY - Radius,
+        MidX + Radius + 1, MidY + Radius + 1);
+    end
+    else if Kind = 'PB' then
+    begin
+      B.Canvas.Brush.Color := FillColor;
+      B.Canvas.Rectangle(R);
+      FillSampleRect(Rect(R.Left + 1, R.Top + 1,
+        R.Left + (R.Right - R.Left) div 2, R.Bottom - 1), ElementColor);
+      B.Canvas.Brush.Style := bsClear;
+      B.Canvas.Pen.Color := LineColor;
+      B.Canvas.Rectangle(R);
+    end
+    else if Kind = 'TR' then
+    begin
+      MidY := (R.Top + R.Bottom) div 2;
+      B.Canvas.Pen.Color := FillColor;
+      B.Canvas.Pen.Width := 5;
+      B.Canvas.MoveTo(R.Left + 4, MidY);
+      B.Canvas.LineTo(R.Right - 4, MidY);
+      Radius := 7;
+      MidX := (R.Left + R.Right) div 2;
+      B.Canvas.Brush.Color := ElementColor;
+      B.Canvas.Pen.Color := ElementColor;
+      B.Canvas.Ellipse(MidX - Radius, MidY - Radius,
+        MidX + Radius + 1, MidY + Radius + 1);
+    end
+    else if Kind = 'BX' then
+    begin
+      if IsNoColorRgb(FDefaultBgRgb) then
+        B.Canvas.Brush.Style := bsClear;
+      B.Canvas.Pen.Color := LineColor;
+      B.Canvas.Rectangle(R);
+    end
+    else if Kind = 'RR' then
+    begin
+      if IsNoColorRgb(FDefaultBgRgb) then
+        B.Canvas.Brush.Style := bsClear;
+      B.Canvas.Pen.Color := LineColor;
+      B.Canvas.RoundRect(R.Left, R.Top, R.Right, R.Bottom, 10, 10);
+    end
+    else if Kind = 'CC' then
+    begin
+      if IsNoColorRgb(FDefaultBgRgb) then
+        B.Canvas.Brush.Style := bsClear;
+      B.Canvas.Pen.Color := LineColor;
+      B.Canvas.Ellipse(R);
+    end;
+
+    AImage.Picture.Bitmap.Assign(B);
+  finally
+    B.Free;
+  end;
+end;
+
+//======================================================
+// Refreshes every component selector after a theme/default color change.
+procedure TForm1.RefreshComponentPaletteImages;
+begin
+  DrawComponentPaletteImage(SelectorButton, 'BT');
+  DrawComponentPaletteImage(SelectorText, 'TX');
+  DrawComponentPaletteImage(SelectorSwitch, 'SW');
+  DrawComponentPaletteImage(SelectorProgress, 'PB');
+  DrawComponentPaletteImage(SelectorSlider, 'TR');
+  DrawComponentPaletteImage(SelectorBox, 'BX');
+  DrawComponentPaletteImage(SelectorRoundRect, 'RR');
+  DrawComponentPaletteImage(SelectorCircle, 'CC');
+end;
+//======================================================
 // Привязывает элементы палитры компонентов к обработчикам добавления.
 procedure TForm1.AddPaletteHandlers;
 begin
-  StaticText1.Hint := 'TX';
-  StaticText2.Hint := 'BT';
-  Image1.Hint := 'SW';
-  Image2.Hint := 'TR';
-  Image3.Hint := 'PB';
-  Shape2.Hint := 'CC';
-  Shape3.Hint := 'BX';
-  Shape10.Hint := 'RR';
+  SelectorButton.Hint := 'BT';
+  SelectorText.Hint := 'TX';
+  SelectorSwitch.Hint := 'SW';
+  SelectorProgress.Hint := 'PB';
+  SelectorSlider.Hint := 'TR';
+  SelectorBox.Hint := 'BX';
+  SelectorRoundRect.Hint := 'RR';
+  SelectorCircle.Hint := 'CC';
   Label10.Hint := 'BT';
   Label11.Hint := 'TR';
   Label12.Hint := 'JPG';
@@ -1011,14 +1171,14 @@ begin
   Label22.Hint := 'TX';
   Label26.Hint := 'RR';
 
-  StaticText1.OnClick := PaletteElementClick;
-  StaticText2.OnClick := PaletteElementClick;
-  Image1.OnClick := PaletteElementClick;
-  Image2.OnClick := PaletteElementClick;
-  Image3.OnClick := PaletteElementClick;
-  Shape2.OnMouseDown := PaletteShapeMouseDown;
-  Shape3.OnMouseDown := PaletteShapeMouseDown;
-  Shape10.OnMouseDown := PaletteShapeMouseDown;
+  SelectorButton.OnClick := PaletteElementClick;
+  SelectorText.OnClick := PaletteElementClick;
+  SelectorSwitch.OnClick := PaletteElementClick;
+  SelectorProgress.OnClick := PaletteElementClick;
+  SelectorSlider.OnClick := PaletteElementClick;
+  SelectorBox.OnClick := PaletteElementClick;
+  SelectorRoundRect.OnClick := PaletteElementClick;
+  SelectorCircle.OnClick := PaletteElementClick;
   Label10.OnClick := PaletteElementClick;
   Label11.OnClick := PaletteElementClick;
   Label12.OnClick := PaletteElementClick;
@@ -2200,6 +2360,8 @@ begin
   end;
 end;
 
+function NormalizeJpgScaleText(const AScale: string): string; forward;
+
 //======================================================
 // Открывает редактор области картинки для выбранной JPG-строки.
 procedure TForm1.OpenImageAreaEditor(ARow: Integer);
@@ -2209,6 +2371,7 @@ var
   SrcY: Integer;
   SrcW: Integer;
   SrcH: Integer;
+  ScaleText: string;
 begin
   if (ARow < 1) or (ARow >= StringGrid1.RowCount) then
     Exit;
@@ -2228,8 +2391,11 @@ begin
   SrcY := StrToIntDef(StringGrid1.Cells[COL_SRCY, ARow], 0);
   SrcW := StrToIntDef(StringGrid1.Cells[COL_SRCW, ARow], 0);
   SrcH := StrToIntDef(StringGrid1.Cells[COL_SRCH, ARow], 0);
-  if Form3.ExecuteCrop(FileName, SrcX, SrcY, SrcW, SrcH) then
+  ScaleText := NormalizeJpgScaleText(StringGrid1.Cells[COL_EXTRA, ARow]);
+  if Form3.ExecuteCropWithJpgScale(FileName, SrcX, SrcY, SrcW, SrcH,
+    ScaleText) then
   begin
+    StringGrid1.Cells[COL_EXTRA, ARow] := NormalizeJpgScaleText(ScaleText);
     if (SrcW < 4) or (SrcH < 4) then
     begin
       SetStatus('Image area too small, selection ignored');
@@ -2537,6 +2703,8 @@ end;
 // Работает с файлами на локальной папке SD и SD-карте ESP.
 function TForm1.SendFileToEspSd(const ALocalFileName: string; var ASdPath: string;
   AProgressLabel: TLabel; AForceOverwrite: Boolean): Boolean;
+label
+  RestartTransfer;
 const
   CHUNK_SIZE = 64;
 var
@@ -2553,6 +2721,27 @@ var
   UseUdp: Boolean;
   ChannelName: string;
   RemoteSize: Int64;
+
+//======================================================
+// После таймаута UDP заново начинает весь файл через открытый COM.
+// Последний UDP-блок мог дойти до ESP при потере ответа, поэтому
+// продолжать с предполагаемого смещения небезопасно.
+  function SwitchUploadToCom: Boolean;
+  begin
+    Result := UseUdp and (FPort <> INVALID_HANDLE_VALUE) and PortAlive;
+    if not Result then
+      Exit;
+    UseUdp := False;
+    ChannelName := 'COM';
+    MonitorWasEnabled := Assigned(FPortMonitor) and FPortMonitor.Enabled;
+    if Assigned(FPortMonitor) then
+      FPortMonitor.Enabled := False;
+    FPortRxText := '';
+    SetStatus('UDP lost. Restarting SD upload through COM: ' + ASdPath);
+    if Assigned(Form4) and Assigned(Form4.Memo1) then
+      Form4.Memo1.Update;
+    Application.ProcessMessages;
+  end;
 
 //======================================================
 // Возвращает вычисленное значение для работы формы.
@@ -2667,13 +2856,23 @@ begin
       end;
     end;
 
+RestartTransfer:
+    Stream.Position := 0;
+    Sent := 0;
+    SetSdProgress(0);
+    if Assigned(AProgressLabel) then
+    begin
+      AProgressLabel.Caption := '0%';
+      AProgressLabel.Update;
+    end;
     if not SendUploadLine('FW|' + ASdPath + '|' + IntToStr(Stream.Size), 'OK|FW|', 3000) then
     begin
+      if SwitchUploadToCom then
+        goto RestartTransfer;
       SetStatus('SD upload start failed: ' + ReplyLine);
       Exit;
     end;
 
-    Sent := 0;
     repeat
       ReadCount := Stream.Read(Buffer, SizeOf(Buffer));
       if ReadCount > 0 then
@@ -2690,6 +2889,8 @@ begin
           ExpectedPrefix := 'OK|FD|';
         if not SendUploadLine(HexLine, ExpectedPrefix, 3000) then
         begin
+          if SwitchUploadToCom then
+            goto RestartTransfer;
           SetStatus('SD upload block failed: ' + ReplyLine);
           Exit;
         end;
@@ -2713,6 +2914,8 @@ begin
 
     if not SendUploadLine('FE', 'OK|FE|', 5000) then
     begin
+      if SwitchUploadToCom then
+        goto RestartTransfer;
       SetStatus('SD upload finish failed: ' + ReplyLine);
       Exit;
     end;
@@ -3197,6 +3400,8 @@ begin
   StringGrid1.Cells[COL_Y, ARow] := IntToStr(SpinEdit2.Value);
   if Cmd = 'JPG' then
   begin
+    StringGrid1.Cells[COL_SRCX, ARow] := IntToStr(SpinEdit7.Value);
+    StringGrid1.Cells[COL_SRCY, ARow] := IntToStr(SpinEdit8.Value);
     JpgScaleRatio(StringGrid1.Cells[COL_EXTRA, ARow], ScaleNum, ScaleDen);
     SrcW := (SpinEdit3.Value * ScaleDen + ScaleNum - 1) div ScaleNum;
     SrcH := (SpinEdit4.Value * ScaleDen + ScaleNum - 1) div ScaleNum;
@@ -3306,6 +3511,10 @@ begin
   SetControlState(Button3, True);
   SetControlState(Button13, True);
   SetControlState(CheckBox4, HasPicture);
+  SetControlState(Label36, HasPicture);
+  SetControlState(ComboBox6, HasPicture);
+  SetControlState(SpinEdit7, HasPicture);
+  SetControlState(SpinEdit8, HasPicture);
 end;
 
 //======================================================
@@ -3329,6 +3538,23 @@ begin
     SpinEdit2.Value := StrToIntDef(StringGrid1.Cells[COL_Y, ARow], 0);
     SpinEdit3.Value := StrToIntDef(StringGrid1.Cells[COL_W, ARow], 0);
     SpinEdit4.Value := StrToIntDef(StringGrid1.Cells[COL_H, ARow], 0);
+    if Cmd = 'JPG' then
+    begin
+      SpinEdit7.Value := StrToIntDef(StringGrid1.Cells[COL_SRCX, ARow], 0);
+      SpinEdit8.Value := StrToIntDef(StringGrid1.Cells[COL_SRCY, ARow], 0);
+    end
+    else
+    begin
+      SpinEdit7.Value := 0;
+      SpinEdit8.Value := 0;
+    end;
+    if Cmd = 'JPG' then
+      ComboBox6.ItemIndex := ComboBox6.Items.IndexOf(
+        NormalizeJpgScaleText(StringGrid1.Cells[COL_EXTRA, ARow]))
+    else
+      ComboBox6.ItemIndex := ComboBox6.Items.IndexOf('1/1');
+    if ComboBox6.ItemIndex < 0 then
+      ComboBox6.ItemIndex := ComboBox6.Items.IndexOf('1/1');
     if Cmd = 'RR' then
       Radius := StrToIntDef(StringGrid1.Cells[COL_EXTRA, ARow], 0)
     else
@@ -3557,17 +3783,31 @@ function TForm1.HitRow(AX, AY: Integer; var AResize: Boolean): Integer;
 var
   R: Integer;
   Rc: TRect;
+  HitRc: TRect;
+  ResizeRc: TRect;
   P: TPoint;
 begin
   Result := -1;
   AResize := False;
   P := DisplayPoint(AX, AY);
   for R := StringGrid1.RowCount - 1 downto 1 do
-    if RowRect(R, Rc) and PtInRect(Rc, P) then
+    if RowRect(R, Rc) then
     begin
-      AResize := PtInRect(Rect(Rc.Right - 10, Rc.Bottom - 10, Rc.Right + 1, Rc.Bottom + 1), P);
-      Result := R;
-      Exit;
+      ResizeRc := Rect(Rc.Right - 10, Rc.Bottom - 10,
+        Rc.Right + 4, Rc.Bottom + 4);
+      if PtInRect(ResizeRc, P) then
+      begin
+        AResize := True;
+        Result := R;
+        Exit;
+      end;
+      HitRc := Rc;
+      InflateRect(HitRc, 2, 2);
+      if PtInRect(HitRc, P) then
+      begin
+        Result := R;
+        Exit;
+      end;
     end;
 end;
 
@@ -3577,6 +3817,10 @@ procedure TForm1.SetRowRect(ARow: Integer; const ARect: TRect);
 var
   W: Integer;
   H: Integer;
+  ScaleNum: Integer;
+  ScaleDen: Integer;
+  SrcW: Integer;
+  SrcH: Integer;
 begin
   if (ARow < 1) or (ARow >= StringGrid1.RowCount) then
     Exit;
@@ -3589,7 +3833,16 @@ begin
   StringGrid1.Cells[COL_X, ARow] := IntToStr(ARect.Left);
   StringGrid1.Cells[COL_Y, ARow] := IntToStr(ARect.Top);
   if UpperCase(Trim(StringGrid1.Cells[COL_CMD, ARow])) = 'JPG' then
-    UpdateImageRowSize(ARow)
+  begin
+    JpgScaleRatio(StringGrid1.Cells[COL_EXTRA, ARow], ScaleNum, ScaleDen);
+    SrcW := (W * ScaleDen + ScaleNum - 1) div ScaleNum;
+    SrcH := (H * ScaleDen + ScaleNum - 1) div ScaleNum;
+    if SrcW < 1 then SrcW := 1;
+    if SrcH < 1 then SrcH := 1;
+    StringGrid1.Cells[COL_SRCW, ARow] := IntToStr(SrcW);
+    StringGrid1.Cells[COL_SRCH, ARow] := IntToStr(SrcH);
+    UpdateImageRowSize(ARow);
+  end
   else
   begin
     StringGrid1.Cells[COL_W, ARow] := IntToStr(W);
@@ -3746,6 +3999,16 @@ var
       ALabel.Font.Color := clGray;
   end;
 
+//======================================================
+// Show the current RGB565 value below its color preview shape.
+  procedure SetupColorValueLabel(ALabel: TLabel; AField: TColorField;
+    const ARgb: string);
+  begin
+    if not Assigned(ALabel) then
+      Exit;
+    ALabel.Caption := UpperCase(ARgb);
+    SetupFieldLabel(ALabel, AField);
+  end;
 begin
   EnsureNoColorLabels;
   Cmd := '';
@@ -3774,6 +4037,11 @@ begin
   SetupFieldLabel(Label19, cfBack);
   SetupFieldLabel(Label25, cfLcdBack);
   SetupFieldLabel(Label30, cfElement);
+  SetupColorValueLabel(Label32, cfLine, FDefaultLineRgb);
+  SetupColorValueLabel(Label33, cfText, FDefaultFgRgb);
+  SetupColorValueLabel(Label34, cfBack, FDefaultBgRgb);
+  SetupColorValueLabel(Label35, cfElement, FDefaultElementRgb);
+  RefreshComponentPaletteImages;
   if IsNoColorRgb(FDefaultLcdBgRgb) then
   begin
     Shape1.Brush.Color := clBlack;
@@ -6306,10 +6574,41 @@ begin
 end;
 
 //======================================================
-// Обновляет строку элемента при изменении числовых полей.
-procedure TForm1.InputSpinChange(Sender: TObject);
+// Applies the selected JPEG decoder/output scale to the current JPG row.
+procedure TForm1.JpgScaleComboChange(Sender: TObject);
+var
+  ScaleText: string;
 begin
   if FLoadingInputs then
+    Exit;
+  if (FSelectedRow < 1) or (FSelectedRow >= StringGrid1.RowCount) then
+    Exit;
+  if UpperCase(Trim(StringGrid1.Cells[COL_CMD, FSelectedRow])) <> 'JPG' then
+    Exit;
+  ScaleText := NormalizeJpgScaleText(ComboBox6.Text);
+  StringGrid1.Cells[COL_EXTRA, FSelectedRow] := ScaleText;
+  UpdateImageRowSize(FSelectedRow);
+  FLoadingInputs := True;
+  try
+    SpinEdit3.Value := StrToIntDef(StringGrid1.Cells[COL_W, FSelectedRow], 1);
+    SpinEdit4.Value := StrToIntDef(StringGrid1.Cells[COL_H, FSelectedRow], 1);
+    Edit1.Text := ScriptFromRow(FSelectedRow);
+  finally
+    FLoadingInputs := False;
+  end;
+  StringGrid1.Invalidate;
+  RepaintPreview;
+end;
+//======================================================
+// Обновляет строку элемента при изменении числовых полей.
+procedure TForm1.InputSpinChange(Sender: TObject);
+var
+  ParsedValue: Integer;
+begin
+  if FLoadingInputs then
+    Exit;
+  if (Sender is TSpinEdit) and
+    not TryStrToInt(Trim(TSpinEdit(Sender).Text), ParsedValue) then
     Exit;
   UpdateRowFromInputs(FSelectedRow);
 end;
@@ -6893,13 +7192,6 @@ begin
     AddElement(Kind);
 end;
 
-//======================================================
-// Добавляет фигуру из панели элементов по клику мыши.
-procedure TForm1.PaletteShapeMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
-begin
-  if Button = mbLeft then
-    AddElement(TControl(Sender).Hint);
-end;
 //======================================================
 // Обрабатывает действие пользователя на форме.
 procedure TForm1.Button16Click(Sender: TObject);
