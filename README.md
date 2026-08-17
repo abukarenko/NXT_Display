@@ -305,24 +305,108 @@ rather than trying to send `A|B` as one text field.
 
 The firmware command buffer is currently 192 bytes including the terminating zero. Keep an individual command line comfortably below this limit, especially commands containing long text or file paths.
 
-### System and diagnostics
+### Command summary
 
-| Command | Description | Example |
-| --- | --- | --- |
-| `HELP` | Print the complete command list to the requesting interface. | `HELP` |
-| `?` | Connection/ready check. Replies with `ready`. | `?` |
-| `SHOWIP` | Return current Wi-Fi IP, SSID, UDP port and host name. | `SHOWIP` |
-| `RESET` | Reply with `OK|RESET` and restart the ESP32 after a short delay. | `RESET` |
-| `SS` | Return the current scene snapshot as command lines, including current interactive control values. | `SS` |
-| `TF` | Show the loaded TFT_eSPI/GFX font samples on the display. | `TF` |
+Every `Example` cell below contains a complete command that can be sent as-is. The exact field order and the meaning of every parameter are documented after the tables.
 
-`SHOWIP` reply format:
+#### System and diagnostics
+
+| Command | Description | Example | Notes |
+| --- | --- | --- | --- |
+| `?` | Check that the display is ready. | `?` | Replies with `ready`. |
+| `HELP` | Print the firmware command list. | `HELP` | The reply is sent to the requesting interface. |
+| `SHOWIP` | Read network connection details. | `SHOWIP` | Returns IP, SSID, UDP port and host name. |
+| `RESET` | Restart the ESP32. | `RESET` | Replies `OK|RESET`, then restarts after a short delay. |
+| `SS` | Get the registered scene snapshot. | `SS` | Returns replayable commands between `BEGIN` and `END` markers. |
+| `TF` | Draw samples of all installed fonts. | `TF` | Replaces the visible screen contents but is not stored as a scene object. |
+
+#### Display control
+
+| Command | Description | Example | Notes |
+| --- | --- | --- | --- |
+| `CL` | Clear the screen with a color. | `CL|0x0000` | Also resets the registered GUI scene. |
+| `BL` | Control the display backlight. | `BL|1` | `0` = off, non-zero = on. |
+| `IV` | Control display color inversion. | `IV|1` | `0` = off, non-zero = on. |
+
+#### GUI drawing
+
+| Command | Description | Example | Notes |
+| --- | --- | --- | --- |
+| `BT` | Draw a touch button. | `BT|1|20|20|120|50|OK|0x001F|0xFFFF|0xFFFF|2|2|C|C` | Produces `EV|BT` touch events. |
+| `BX` | Draw a box. | `BX|1|10|10|120|50|0x2104|0xFFFF|0|1` | `fill=0x0001` disables filling. |
+| `RR` | Draw a rounded rectangle. | `RR|2|20|80|120|50|0x001F|0xFFFF|10|2` | Uses the same renderer as `BX`; set a non-zero radius. |
+| `TX` | Draw a text label. | `TX|1|20|90|Hello|0xFFFF|0x0001|2|120|30|C|C` | `background=0x0001` is transparent. |
+| `TW` | Draw a titled text window. | `TW|1|20|140|280|120|Status|System ready|0x4208|0x001F` | Title and body are separate text fields. |
+| `SB` | Draw a scroll bar. | `SB|1|300|150|12|120|V|50|100|0x0000|0x07FF` | Display-only; `H` or `V` orientation. |
+| `TR` | Draw an interactive track bar. | `TR|1|40|220|220|28|35|100|0x4208|0xFFE0` | Produces `EV|TR` touch events. |
+| `PB` | Draw a progress bar. | `PB|1|40|260|220|20|75|0x07E0|0x0000|0xFFFF` | Percentage is constrained to `0..100`. |
+| `CC` | Draw a circle. | `CC|1|350|80|48|0xF800|0xFFFF|2` | `fill=0x0001` draws no fill. |
+| `SW` | Draw an interactive switch. | `SW|1|20|80|70|32|1|0x4208|0x07E0` | Produces `EV|SW`; `0` = off, `1` = on. |
+| `BM` | Draw a built-in monochrome bitmap. | `BM|1|30|30|wifi|0x07FF|0x0001|2` | Names: `play`, `stop`, `wifi`. |
+
+#### microSD and files
+
+| Command | Description | Example | Notes |
+| --- | --- | --- | --- |
+| `SD` | Read microSD status and capacity. | `SD` | Reports readiness, total capacity and used space. |
+| `LS` | List a directory. | `LS|/images` | The path must name a directory on the microSD card. |
+| `FS` | Read a file size. | `FS|/images/neon1.jpg` | Returns the size of one file. |
+| `SC` | Execute a command script. | `SC|/script100.nxt` | Runs one protocol command per script line. |
+| `JPG` | Draw a JPEG from microSD. | `JPG|2|80|40|/images/neon1.jpg|1/2` | Optional source rectangle fields select part of the image. |
+| `FW` | Start writing a file. | `FW|/script100.nxt|34` | `size` is the exact expected byte count. |
+| `FD` | Append hexadecimal bytes. | `FD|4A50477C327C38307C3430` | Two hexadecimal characters encode one byte. |
+| `FDO` | Write bytes at an expected offset. | `FDO|0|4A50477C327C38307C3430` | The offset must match the current write position. |
+| `FE` | Finish the current file upload. | `FE` | Closes the file and validates the final size. |
+
+### Detailed command syntax
+
+Fields are separated by `|`. The format lines below show the required field order; fields in square brackets are optional.
+
+#### System and diagnostic commands
+
+##### `?` — ready check
+
+```text
+?
+```
+
+No parameters. The display replies with `ready`.
+
+##### `HELP` — command list
+
+```text
+HELP
+```
+
+No parameters. Prints the command list to the interface that sent the request.
+
+##### `SHOWIP` — network information
+
+```text
+SHOWIP
+```
+
+No parameters. Reply format:
 
 ```text
 IP|192.168.1.50|SSID|mywifi|PORT|4210|HOST|nxt-display
 ```
 
-`SS` returns the scene between markers:
+##### `RESET` — restart
+
+```text
+RESET
+```
+
+No parameters. The ESP32 acknowledges the request before restarting.
+
+##### `SS` — scene snapshot
+
+```text
+SS
+```
+
+No parameters. The response contains the number of stored command lines and the lines needed to reconstruct the scene:
 
 ```text
 OK|SS|BEGIN|3
@@ -332,104 +416,424 @@ SW|1|20|80|70|32|1|0x4208|0x07E0
 OK|SS|END
 ```
 
-### Display control
+`SS` reads the scene; restore it by sending the returned lines back in the same order.
 
-| Command | Description | Example |
-| --- | --- | --- |
-| `CL|color` | Clear the screen with `color` and reset the registered GUI scene. | `CL|0x0000` |
-| `BL|0/1` | Backlight off/on. | `BL|1` |
-| `IV|0/1` | Display inversion off/on. | `IV|1` |
-
-### GUI drawing commands
-
-| Command | Description | Example |
-| --- | --- | --- |
-| `BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V` | Draw a touch button. `H=L/C/R`, `V=T/C/B`. Optional tail fields default to line `1`, font `2`, centered alignment. | `BT|1|20|20|120|50|OK|0x001F|0xFFFF|0xFFFF|2|2|C|C` |
-| `BX|id|x|y|w|h|fill|outline|radius|line` | Draw a filled/outlined box. Set `fill=0x0001` for no fill. | `BX|1|10|10|120|50|0x2104|0xFFFF|0|1` |
-| `RR|id|x|y|w|h|fill|outline|radius|line` | Draw a rectangle using the same renderer as `BX`; normally used with a non-zero corner radius. | `RR|1|10|10|100|40|0x0001|0xFFFF|8|2` |
-| `TX|id|x|y|text|color|background|font|w|h|H|V` | Draw a text label. `background=0x0001` gives transparent text background. If `w/h` are supplied, alignment can be selected with `H` and `V`. | `TX|1|20|90|Hello|0xFFFF|0x0001|2|120|30|C|C` |
-| `TW|id|x|y|w|h|title|text|fill|outline` | Draw a text window with title and body. `fill=0x0001` makes the body transparent. | `TW|1|20|140|280|120|Status|System ready|0x4208|0x001F` |
-| `SB|id|x|y|w|h|H/V|value|max|track|thumb` | Draw a horizontal or vertical scroll bar. | `SB|1|300|150|12|120|V|50|100|0x0000|0x07FF` |
-| `TR|id|x|y|w|h|value|max|track|thumb` | Draw an interactive horizontal track bar. | `TR|1|40|220|220|28|35|100|0x4208|0xFFE0` |
-| `PB|id|x|y|w|h|percent|fill|background|outline` | Draw a horizontal progress bar. | `PB|1|40|260|220|20|75|0x07E0|0x0000|0xFFFF` |
-| `CC|id|x|y|diameter|fill|outline|line` | Draw a circle. Set `fill=0x0001` for outline only. | `CC|1|350|80|48|0xF800|0xFFFF|2` |
-| `SW|id|x|y|w|h|0/1|track|thumb` | Draw an interactive switch. `0` = off/left, `1` = on/right. | `SW|1|350|150|70|32|1|0x4208|0x07E0` |
-| `BM|id|x|y|name|foreground|background|scale` | Draw a built-in monochrome bitmap. `background=0x0001` enables transparency. | `BM|1|30|30|wifi|0x07FF|0x0001|2` |
-
-Built-in bitmap names:
-
-| Name | Meaning |
-| --- | --- |
-| `play` | Play icon |
-| `stop` | Stop icon |
-| `wifi` | Wi-Fi icon |
-
-### Touch events
-
-Buttons and interactive controls report events on USB Serial, UART2 and, after a UDP peer has sent a command, back to that UDP peer.
-
-Button event format:
+##### `TF` — font test
 
 ```text
-EV|BT|id|DOWN|x|y
-EV|BT|id|UP|x|y
-EV|BT|id|CLICK|x|y
+TF
 ```
+
+No parameters. Draws samples for font IDs `1..9`.
+
+#### Display commands
+
+##### `CL` — clear screen
+
+```text
+CL|color
+```
+
+- `color` — RGB565 screen color, for example `0x0000` for black.
+- The command clears all registered scene objects, then stores itself as the first scene line.
 
 Example:
 
 ```text
-EV|BT|1|CLICK|74|268
+CL|0x0000
 ```
 
-Track bar and switch event format:
+##### `BL` — backlight
 
 ```text
+BL|enabled
+```
+
+- `enabled` — `0` turns the backlight off; any non-zero value turns it on.
+
+Example:
+
+```text
+BL|1
+```
+
+##### `IV` — display inversion
+
+```text
+IV|enabled
+```
+
+- `enabled` — `0` disables inversion; any non-zero value enables it.
+
+Example:
+
+```text
+IV|1
+```
+
+#### GUI commands
+
+Most GUI commands start with these fields:
+
+- `id` — integer object identifier within that command type. Sending the same command type and ID replaces its scene definition.
+- `x`, `y` — upper-left position in pixels.
+- `w`, `h` — width and height in pixels.
+- `fill`, `outline`, `text`, `background`, `track`, `thumb`, `foreground` — RGB565 colors.
+
+##### `BT` — touch button
+
+```text
+BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V
+```
+
+- `id` — button identifier returned in `EV|BT` events.
+- `x`, `y` — button position.
+- `w`, `h` — button size and touch area.
+- `label` — button caption; it cannot contain `|`.
+- `fill` — button background color.
+- `outline` — border color.
+- `text` — caption color.
+- `line` — border thickness; use `1..4`.
+- `font` — font ID `1..9`.
+- `H` — horizontal caption alignment: `L`, `C` or `R`.
+- `V` — vertical caption alignment: `T`, `C` or `B`.
+
+Example:
+
+```text
+BT|1|20|20|120|50|OK|0x001F|0xFFFF|0xFFFF|2|2|C|C
+```
+
+##### `BX` / `RR` — box or rounded rectangle
+
+```text
+BX|id|x|y|w|h|fill|outline|radius|line
+RR|id|x|y|w|h|fill|outline|radius|line
+```
+
+- `id` — object identifier.
+- `x`, `y` — rectangle position.
+- `w`, `h` — rectangle size.
+- `fill` — fill color; `0x0001` means no fill.
+- `outline` — border color.
+- `radius` — corner radius; `0` makes square corners.
+- `line` — border thickness; use `1..4`.
+
+Examples:
+
+```text
+BX|1|10|10|120|50|0x2104|0xFFFF|0|1
+RR|2|20|80|120|50|0x001F|0xFFFF|10|2
+```
+
+##### `TX` — text label
+
+```text
+TX|id|x|y|text|color|background|font[|w|h|H|V]
+```
+
+- `id` — text object identifier.
+- `x`, `y` — text origin, or upper-left corner of the optional alignment box.
+- `text` — displayed text; it cannot contain `|`.
+- `color` — text color.
+- `background` — text background; `0x0001` means transparent.
+- `font` — font ID `1..9`.
+- `w`, `h` — optional alignment-box size. Use `0` or omit them for origin-based drawing.
+- `H` — optional horizontal alignment: `L`, `C` or `R`.
+- `V` — optional vertical alignment: `T`, `C` or `B`.
+
+Example:
+
+```text
+TX|1|20|90|Hello|0xFFFF|0x0001|2|120|30|C|C
+```
+
+##### `TW` — text window
+
+```text
+TW|id|x|y|w|h|title|text|fill|outline
+```
+
+- `id` — window identifier.
+- `x`, `y` — window position.
+- `w`, `h` — window size.
+- `title` — title-bar text; it cannot contain `|`.
+- `text` — body text; it cannot contain `|`.
+- `fill` — body background color; `0x0001` requests transparent fill.
+- `outline` — frame and title color.
+
+Example:
+
+```text
+TW|1|20|140|280|120|Status|System ready|0x4208|0x001F
+```
+
+##### `SB` — scroll bar
+
+```text
+SB|id|x|y|w|h|orientation|value|max|track|thumb
+```
+
+- `id` — scroll-bar identifier.
+- `x`, `y` — scroll-bar position.
+- `w`, `h` — scroll-bar size.
+- `orientation` — `H` for horizontal or `V` for vertical.
+- `value` — current position.
+- `max` — maximum position; use a positive value.
+- `track` — track color.
+- `thumb` — thumb color.
+
+Example:
+
+```text
+SB|1|300|150|12|120|V|50|100|0x0000|0x07FF
+```
+
+##### `TR` — interactive track bar
+
+```text
+TR|id|x|y|w|h|value|max|track|thumb
+```
+
+- `id` — control identifier returned in `EV|TR` events.
+- `x`, `y` — track-bar position.
+- `w`, `h` — track-bar size and touch area.
+- `value` — current value.
+- `max` — maximum value; use a positive value.
+- `track` — track color.
+- `thumb` — thumb color.
+
+Example:
+
+```text
+TR|1|40|220|220|28|35|100|0x4208|0xFFE0
+```
+
+##### `PB` — progress bar
+
+```text
+PB|id|x|y|w|h|percent|fill|background|outline
+```
+
+- `id` — progress-bar identifier.
+- `x`, `y` — progress-bar position.
+- `w`, `h` — progress-bar size.
+- `percent` — filled amount, constrained to `0..100`.
+- `fill` — completed-area color.
+- `background` — unfilled-area color.
+- `outline` — border color.
+
+Example:
+
+```text
+PB|1|40|260|220|20|75|0x07E0|0x0000|0xFFFF
+```
+
+##### `CC` — circle
+
+```text
+CC|id|x|y|diameter|fill|outline|line
+```
+
+- `id` — circle identifier.
+- `x`, `y` — upper-left corner of the circle bounding box.
+- `diameter` — circle diameter in pixels.
+- `fill` — fill color; `0x0001` means no fill.
+- `outline` — outline color.
+- `line` — outline thickness; use `1..4`.
+
+Example:
+
+```text
+CC|1|350|80|48|0xF800|0xFFFF|2
+```
+
+##### `SW` — interactive switch
+
+```text
+SW|id|x|y|w|h|state|track|thumb
+```
+
+- `id` — switch identifier returned in `EV|SW` events.
+- `x`, `y` — switch position.
+- `w`, `h` — switch size and touch area.
+- `state` — `0` for off/left or `1` for on/right.
+- `track` — switch track color.
+- `thumb` — switch thumb color.
+
+Example:
+
+```text
+SW|1|20|80|70|32|1|0x4208|0x07E0
+```
+
+##### `BM` — built-in bitmap
+
+```text
+BM|id|x|y|name|foreground|background|scale
+```
+
+- `id` — bitmap identifier.
+- `x`, `y` — bitmap position.
+- `name` — built-in asset name: `play`, `stop` or `wifi`.
+- `foreground` — set-pixel color.
+- `background` — background color; `0x0001` means transparent.
+- `scale` — integer pixel scale.
+
+Example:
+
+```text
+BM|1|30|30|wifi|0x07FF|0x0001|2
+```
+
+#### Touch event formats
+
+Touch events are output messages, not commands sent to the display.
+
+| Event | Description | Example | Notes |
+| --- | --- | --- | --- |
+| `EV|BT` | Button event. | `EV|BT|1|CLICK|74|268` | Events: `DOWN`, `UP`, `CLICK`. |
+| `EV|TR` | Track-bar event. | `EV|TR|2|CHANGE|67|220|180` | Includes the current value. |
+| `EV|SW` | Switch event. | `EV|SW|3|CHANGE|1|350|132` | Includes the new binary state. |
+
+```text
+EV|BT|id|event|x|y
 EV|TR|id|event|value|x|y
 EV|SW|id|event|value|x|y
 ```
 
-Track bars can report `DOWN`, `CHANGE`, `UP` and `CLICK`. Switches report their state change with `CHANGE` and also produce touch events.
+- `id` — ID of the touched control.
+- `event` — touch phase. Buttons use `DOWN`, `UP`, `CLICK`; track bars can also use `CHANGE`; switches report the toggled state with `CHANGE`.
+- `value` — current `TR` value or `SW` state.
+- `x`, `y` — touch coordinates.
 
-### microSD commands
+#### microSD and file commands
 
-| Command | Description | Example |
-| --- | --- | --- |
-| `SD` | Return microSD readiness, capacity and used space. | `SD` |
-| `LS|path` | List files in a microSD directory. | `LS|/` |
-| `FS|path` | Return the size of one file. | `FS|/icons/play.jpg` |
-| `SC|path` | Run a text command script from microSD. | `SC|/scripts/demo.nxt` |
-| `JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH` | Draw a JPEG from microSD. Optional source rectangle fields allow only part of the image to be rendered. | `JPG|1|20|20|/icons/play.jpg|1/2|0|0|64|64` |
-| `FW|path|size` | Begin writing a file to microSD. `size` is the expected file size in bytes. | `FW|/data.bin|1024` |
-| `FD|hex` | Append a block of hexadecimal byte data to the file opened by `FW`. | `FD|48656C6C6F` |
-| `FDO|offset|hex` | Write hexadecimal byte data at the expected file offset. | `FDO|0|48656C6C6F` |
-| `FE` | Finish/close the current microSD file upload. | `FE` |
-
-Preferred JPEG scale values:
-
-| Scale | Result |
-| --- | --- |
-| `1/4` | decode at quarter size |
-| `1/2` | decode at half size |
-| `1/1` | native size |
-| `2/1` | 2× output zoom |
-| `4/1` | 4× output zoom |
-
-The older numeric JPEG scale values `2`, `4`, and `8` are also accepted as decoder downscale factors.
-
-Example using the full JPEG:
+##### `SD` — card status
 
 ```text
-JPG|2|80|40|/icons/play.jpg|1/1
+SD
 ```
 
-Example drawing a selected source area:
+No parameters. Reports whether microSD is ready and returns capacity/usage information.
+
+##### `LS` — list directory
 
 ```text
+LS|path
+```
+
+- `path` — directory path on microSD, for example `/` or `/images`.
+
+Example:
+
+```text
+LS|/images
+```
+
+##### `FS` — file size
+
+```text
+FS|path
+```
+
+- `path` — full file path on microSD.
+
+Example:
+
+```text
+FS|/images/neon1.jpg
+```
+
+##### `SC` — run script
+
+```text
+SC|path
+```
+
+- `path` — path to a text script on microSD.
+- Each non-empty line is processed as one normal command. Lines beginning with `#` are ignored.
+
+Example:
+
+```text
+SC|/script100.nxt
+```
+
+##### `JPG` — draw JPEG
+
+```text
+JPG|id|x|y|path|scale[|srcX|srcY|srcW|srcH]
+```
+
+- `id` — JPEG scene-object identifier.
+- `x`, `y` — destination position on the display.
+- `path` — JPEG path on microSD.
+- `scale` — `1/4`, `1/2`, `1/1`, `2/1` or `4/1`. Older decoder factors `2`, `4`, `8` are also accepted.
+- `srcX`, `srcY` — optional source-area origin.
+- `srcW`, `srcH` — optional source-area size. Use positive values to enable source clipping.
+- Baseline JPEG is supported; progressive JPEG is not supported.
+
+Examples:
+
+```text
+JPG|2|80|40|/images/neon1.jpg|1/2
 JPG|3|100|60|/images/panel.jpg|1/2|40|20|160|120
 ```
 
-Baseline JPEG files are the safest choice; progressive JPEG is not supported by the decoder.
+##### `FW` — begin file write
+
+```text
+FW|path|size
+```
+
+- `path` — destination file path on microSD.
+- `size` — exact expected file size in bytes.
+
+Example:
+
+```text
+FW|/script100.nxt|34
+```
+
+##### `FD` — append hexadecimal data
+
+```text
+FD|hex
+```
+
+- `hex` — an even-length hexadecimal string; every pair is one output byte.
+- The data is appended at the current upload position.
+
+Example:
+
+```text
+FD|4A50477C327C38307C3430
+```
+
+##### `FDO` — write at expected offset
+
+```text
+FDO|offset|hex
+```
+
+- `offset` — expected current byte offset in the open upload.
+- `hex` — an even-length hexadecimal byte string.
+- The command rejects an unexpected offset, which helps detect missing or repeated blocks.
+
+Example:
+
+```text
+FDO|0|4A50477C327C38307C3430
+```
+
+##### `FE` — finish file write
+
+```text
+FE
+```
+
+No parameters. Closes the active upload and checks the number of written bytes against the `FW` size.
 
 ### Protocol examples / Recipes
 
