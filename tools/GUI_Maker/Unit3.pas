@@ -26,6 +26,8 @@ type
     Label7: TLabel;
     Label8: TLabel;
     TrackBar2: TTrackBar;
+    Label36: TLabel;
+    ComboBox6: TComboBox;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure PaintBox1Paint(Sender: TObject);
@@ -63,6 +65,8 @@ type
   public
     function ExecuteCrop(const AFileName: string; var ASrcX, ASrcY, ASrcW, ASrcH: Integer): Boolean;
     function ExecuteCropWithScale(const AFileName: string; var ASrcX, ASrcY, ASrcW, ASrcH, AScalePercent: Integer): Boolean;
+    function ExecuteCropWithJpgScale(const AFileName: string; var ASrcX, ASrcY,
+      ASrcW, ASrcH: Integer; var AScaleText: string): Boolean;
     procedure RenderSelectionToBitmap(ABitmap: TBitmap);
   end;
 
@@ -83,6 +87,14 @@ begin
   FPanY := 0;
   AlphaBlend := False;
   AlphaBlendValue := 255;
+  ComboBox6.Style := csDropDownList;
+  ComboBox6.Items.Clear;
+  ComboBox6.Items.Add('1/4');
+  ComboBox6.Items.Add('1/2');
+  ComboBox6.Items.Add('1/1');
+  ComboBox6.Items.Add('2/1');
+  ComboBox6.Items.Add('4/1');
+  ComboBox6.ItemIndex := ComboBox6.Items.IndexOf('1/1');
 end;
 
 //======================================================
@@ -267,6 +279,30 @@ begin
   Result := ExecuteCropWithScale(AFileName, ASrcX, ASrcY, ASrcW, ASrcH, ScalePercent);
 end;
 
+//======================================================
+// Opens the crop editor and exchanges the real JPEG output scale.
+function TForm3.ExecuteCropWithJpgScale(const AFileName: string;
+  var ASrcX, ASrcY, ASrcW, ASrcH: Integer;
+  var AScaleText: string): Boolean;
+var
+  ScalePercent: Integer;
+  ScaleIndex: Integer;
+begin
+  ScaleIndex := ComboBox6.Items.IndexOf(Trim(AScaleText));
+  if ScaleIndex < 0 then
+    ScaleIndex := ComboBox6.Items.IndexOf('1/1');
+  ComboBox6.ItemIndex := ScaleIndex;
+  ScalePercent := 100;
+  Result := ExecuteCropWithScale(AFileName, ASrcX, ASrcY, ASrcW, ASrcH,
+    ScalePercent);
+  if Result then
+  begin
+    if ComboBox6.ItemIndex >= 0 then
+      AScaleText := ComboBox6.Items[ComboBox6.ItemIndex]
+    else
+      AScaleText := '1/1';
+  end;
+end;
 //======================================================
 // Обрабатывает изображение, масштаб или выбранную область.
 function TForm3.ExecuteCropWithScale(const AFileName: string; var ASrcX, ASrcY, ASrcW, ASrcH, AScalePercent: Integer): Boolean;

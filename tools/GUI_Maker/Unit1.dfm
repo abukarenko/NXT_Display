@@ -60,8 +60,8 @@ object Form1: TForm1
   object SelectorSwitch: TImage
     Left = 552
     Top = 172
-    Width = 65
-    Height = 32
+    Width = 43
+    Height = 19
   end
   object Label11: TLabel
     Left = 552
@@ -151,13 +151,13 @@ object Form1: TForm1
     Left = 552
     Top = 92
     Width = 65
-    Height = 30
+    Height = 13
   end
   object SelectorProgress: TImage
     Left = 552
-    Top = 227
+    Top = 228
     Width = 65
-    Height = 36
+    Height = 12
   end
   object Label21: TLabel
     Left = 552

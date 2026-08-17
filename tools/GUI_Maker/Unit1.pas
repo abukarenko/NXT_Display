@@ -186,6 +186,9 @@ type
     FUdpLastProbeTick: DWORD;
     FUdpLastOkTick: DWORD;
     FUdpBusy: Boolean;
+    FUdpLossShown: Boolean;
+    FLastPopupText: string;
+    FLastPopupTick: DWORD;
     FSdScriptsLastTick: DWORD;
     FRefreshingSdScripts: Boolean;
     FPortMonitor: TTimer;
@@ -341,6 +344,8 @@ type
     function PortAlive: Boolean;
     procedure PollPortInput;
     procedure HandleRxLine(const ALine: string);
+    procedure ShowErrorPopup(const AText: string);
+    procedure MarkUdpAlive;
     procedure ApplyRts;
     procedure OpenClosePort;
     procedure ClosePort(AErrorState: Boolean = False);
@@ -550,6 +555,9 @@ begin
   WSAStartup($0202, WsaData);
   FPort := INVALID_HANDLE_VALUE;
   FUdpSocket := INVALID_SOCKET;
+  FUdpLossShown := False;
+  FLastPopupText := '';
+  FLastPopupTick := 0;
   FPortMonitor := nil;
   FPortMonitorBusy := False;
   FPortRxText := '';
@@ -1021,6 +1029,8 @@ var
   MidX: Integer;
   MidY: Integer;
   Radius: Integer;
+  TrackHeight: Integer;
+  BarRect: TRect;
   S: string;
 
   procedure FillSampleRect(const ARect: TRect; AColor: TColor);
@@ -1074,39 +1084,71 @@ begin
     end
     else if Kind = 'SW' then
     begin
-      InflateRect(R, -2, -4);
-      B.Canvas.RoundRect(R.Left, R.Top, R.Right, R.Bottom, 16, 16);
-      Radius := (R.Bottom - R.Top - 4) div 2;
+      Radius := (R.Bottom - R.Top) div 2;
+      TrackHeight := (R.Bottom - R.Top) div 14;
+      if TrackHeight < 2 then
+        TrackHeight := 2;
       MidY := (R.Top + R.Bottom) div 2;
-      MidX := R.Right - Radius - 2;
-      B.Canvas.Brush.Color := ElementColor;
-      B.Canvas.Pen.Color := ElementColor;
-      B.Canvas.Ellipse(MidX - Radius, MidY - Radius,
-        MidX + Radius + 1, MidY + Radius + 1);
+      MidX := R.Left + Radius;
+
+      B.Canvas.Brush.Color := FillColor;
+      B.Canvas.Pen.Width := TrackHeight;
+      B.Canvas.Pen.Color := FillColor;
+      B.Canvas.RoundRect(R.Left, R.Top, R.Right, R.Bottom,
+        R.Bottom - R.Top, R.Bottom - R.Top);
+      B.Canvas.Pen.Width := 1;
+      B.Canvas.Pen.Color := LineColor;
+      B.Canvas.Brush.Style := bsClear;
+      B.Canvas.RoundRect(R.Left, R.Top, R.Right, R.Bottom,
+        R.Bottom - R.Top, R.Bottom - R.Top);
+      B.Canvas.Brush.Style := bsSolid;
+      B.Canvas.Brush.Color := TextColor;
+      B.Canvas.Pen.Color := LineColor;
+      B.Canvas.Ellipse(MidX - Radius + TrackHeight * 2,
+        MidY - Radius + TrackHeight * 2,
+        MidX + Radius - TrackHeight * 2,
+        MidY + Radius - TrackHeight * 2);
     end
     else if Kind = 'PB' then
     begin
       B.Canvas.Brush.Color := FillColor;
-      B.Canvas.Rectangle(R);
-      FillSampleRect(Rect(R.Left + 1, R.Top + 1,
-        R.Left + (R.Right - R.Left) div 2, R.Bottom - 1), ElementColor);
+      B.Canvas.Pen.Color := LineColor;
+      B.Canvas.RoundRect(R.Left, R.Top, R.Right, R.Bottom, 8, 8);
+      FillSampleRect(Rect(R.Left + 2, R.Top + 2,
+        R.Right - 2, R.Bottom - 2), FillColor);
+      FillSampleRect(Rect(R.Left + 2, R.Top + 2,
+        R.Left + 2 + (R.Right - R.Left - 4) div 2,
+        R.Bottom - 2), ElementColor);
       B.Canvas.Brush.Style := bsClear;
       B.Canvas.Pen.Color := LineColor;
-      B.Canvas.Rectangle(R);
+      B.Canvas.RoundRect(R.Left, R.Top, R.Right, R.Bottom, 8, 8);
+      B.Canvas.Brush.Style := bsSolid;
     end
     else if Kind = 'TR' then
     begin
       MidY := (R.Top + R.Bottom) div 2;
-      B.Canvas.Pen.Color := FillColor;
-      B.Canvas.Pen.Width := 5;
-      B.Canvas.MoveTo(R.Left + 4, MidY);
-      B.Canvas.LineTo(R.Right - 4, MidY);
-      Radius := 7;
+      TrackHeight := (R.Bottom - R.Top) div 2;
+      if TrackHeight < 2 then
+        TrackHeight := 2;
+      Radius := (R.Bottom - R.Top) div 2;
+      if Radius < 1 then
+        Radius := 1;
       MidX := (R.Left + R.Right) div 2;
+      BarRect := Rect(R.Left, MidY - TrackHeight div 2,
+        R.Right, MidY - TrackHeight div 2 + TrackHeight);
+
+      B.Canvas.Brush.Color := LineColor;
+      B.Canvas.Pen.Color := LineColor;
+      B.Canvas.RoundRect(BarRect.Left, BarRect.Top, BarRect.Right,
+        BarRect.Bottom, TrackHeight, TrackHeight);
       B.Canvas.Brush.Color := ElementColor;
       B.Canvas.Pen.Color := ElementColor;
+      B.Canvas.RoundRect(BarRect.Left, BarRect.Top, MidX,
+        BarRect.Bottom, TrackHeight, TrackHeight);
+      B.Canvas.Brush.Color := FillColor;
+      B.Canvas.Pen.Color := clBlack;
       B.Canvas.Ellipse(MidX - Radius, MidY - Radius,
-        MidX + Radius + 1, MidY + Radius + 1);
+        MidX + Radius, MidY + Radius);
     end
     else if Kind = 'BX' then
     begin
@@ -3102,8 +3144,8 @@ begin
   else if AKind = 'SW' then
   begin
     StringGrid1.Cells[COL_TEXT, R] := '0';
-    StringGrid1.Cells[COL_W, R] := '120';
-    StringGrid1.Cells[COL_H, R] := '52';
+    StringGrid1.Cells[COL_W, R] := '65';
+    StringGrid1.Cells[COL_H, R] := '28';
     StringGrid1.Cells[COL_C1, R] := FDefaultLineRgb;
     StringGrid1.Cells[COL_FONT, R] := FDefaultFgRgb;
     StringGrid1.Cells[COL_C2, R] := FDefaultBgRgb;
@@ -4823,6 +4865,7 @@ begin
     begin
       SetUdpStateColor(clGray);
       SetStatus('UDP socket error');
+      ShowErrorPopup('UDP socket error');
       Exit;
     end;
 
@@ -5240,6 +5283,8 @@ begin
       CloseUdpSocket;
       SetUdpStateColor(clGray);
       SetStatus('UDP send error');
+      FUdpLossShown := True;
+      ShowErrorPopup('UDP connection lost: send error');
       Exit;
     end;
 
@@ -5251,9 +5296,15 @@ begin
       begin
         Buffer[ReadCount] := #0;
         ReceivedLine := Trim(string(Buffer));
+        MarkUdpAlive;
+        if Pos('ERR|', UpperCase(ReceivedLine)) = 1 then
+        begin
+          AReply := ReceivedLine;
+          HandleRxLine(ReceivedLine);
+          Break;
+        end;
         if Pos('EV|', UpperCase(ReceivedLine)) = 1 then
         begin
-          FUdpLastOkTick := GetTickCount;
           SetUdpStateColor(clLime);
           HandleRxLine(ReceivedLine);
           Continue;
@@ -5265,7 +5316,6 @@ begin
           Continue;
         end;
         AReply := ReceivedLine;
-        FUdpLastOkTick := GetTickCount;
         Result := True;
         Break;
       end;
@@ -5275,11 +5325,16 @@ begin
 
     if Result then
       SetUdpStateColor(clLime)
+    else if Pos('ERR|', UpperCase(AReply)) = 1 then
+      SetUdpStateColor(clLime)
     else
     begin
       SetUdpStateColor(clGray);
       AReply := 'timeout';
       SetStatus('UDP no reply: ' + string(HostText));
+      FUdpLossShown := True;
+      ShowErrorPopup('UDP connection lost: ' + string(HostText) + ':' +
+        IntToStr(Port));
     end;
   finally
     FUdpBusy := False;
@@ -5308,7 +5363,7 @@ begin
         Line := Trim(string(Buffer));
         if Line <> '' then
         begin
-          FUdpLastOkTick := GetTickCount;
+          MarkUdpAlive;
           SetUdpStateColor(clLime);
           HandleRxLine(Line);
         end;
@@ -5363,10 +5418,20 @@ begin
     begin
       CloseUdpSocket;
       SetUdpStateColor(clGray);
+      FUdpLossShown := True;
+      ShowErrorPopup('UDP connection lost: send error');
       Exit;
     end;
     if (FUdpLastOkTick = 0) or (GetTickCount - FUdpLastOkTick > 6000) then
-      SetUdpStateColor(clGray)
+    begin
+      SetUdpStateColor(clGray);
+      if not FUdpLossShown then
+      begin
+        FUdpLossShown := True;
+        ShowErrorPopup('UDP connection lost: ' + string(HostText) + ':' +
+          IntToStr(Port));
+      end;
+    end
     else
       SetUdpStateColor(clLime);
   finally
@@ -5520,6 +5585,32 @@ begin
 end;
 
 //======================================================
+// Показывает важную ошибку один раз, не создавая каскад одинаковых окон.
+procedure TForm1.ShowErrorPopup(const AText: string);
+var
+  Text: string;
+  NowTick: DWORD;
+begin
+  Text := Trim(AText);
+  if Text = '' then
+    Exit;
+  NowTick := GetTickCount;
+  if (Text = FLastPopupText) and (NowTick - FLastPopupTick < 2000) then
+    Exit;
+  FLastPopupText := Text;
+  FLastPopupTick := NowTick;
+  ShowMessage(Text);
+end;
+
+//======================================================
+// Отмечает любой принятый UDP-пакет как подтверждение живого соединения.
+procedure TForm1.MarkUdpAlive;
+begin
+  FUdpLastOkTick := GetTickCount;
+  FUdpLossShown := False;
+end;
+
+//======================================================
 // Обрабатывает входящую строку от ESP и обновляет состояние D7.
 procedure TForm1.HandleRxLine(const ALine: string);
 var
@@ -5531,6 +5622,11 @@ var
   R: Integer;
 begin
   SetStatus('RX: ' + ALine);
+  if Pos('ERR|', UpperCase(Trim(ALine))) = 1 then
+  begin
+    ShowErrorPopup(Trim(ALine));
+    Exit;
+  end;
   Parts := TStringList.Create;
   try
     SplitPipe(Trim(ALine), Parts);
@@ -6798,6 +6894,8 @@ procedure TForm1.UdpCheckClick(Sender: TObject);
 begin
   if CheckBox3.Checked then
   begin
+    FUdpLastOkTick := GetTickCount;
+    FUdpLossShown := False;
     SetUdpStateColor(clLime);
     if Assigned(FPortMonitor) then
       FPortMonitor.Enabled := True;
@@ -6805,6 +6903,7 @@ begin
   else
   begin
     CloseUdpSocket;
+    FUdpLossShown := False;
     SetUdpStateColor(clGreen);
     if (FPort = INVALID_HANDLE_VALUE) and Assigned(FPortMonitor) then
       FPortMonitor.Enabled := False;

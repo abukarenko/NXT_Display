@@ -83,10 +83,17 @@ object Form3: TForm3
     Alignment = taRightJustify
     Caption = '255'
   end
+  object Label36: TLabel
+    Left = 504
+    Top = 205
+    Width = 25
+    Height = 13
+    Caption = 'Scale'
+  end
   object SpinEdit1: TSpinEdit
     Left = 504
     Top = 32
-    Width = 96
+    Width = 94
     Height = 22
     MaxValue = 10000
     MinValue = 0
@@ -97,7 +104,7 @@ object Form3: TForm3
   object SpinEdit2: TSpinEdit
     Left = 504
     Top = 80
-    Width = 96
+    Width = 94
     Height = 22
     MaxValue = 10000
     MinValue = 0
@@ -108,7 +115,7 @@ object Form3: TForm3
   object SpinEdit3: TSpinEdit
     Left = 504
     Top = 128
-    Width = 96
+    Width = 94
     Height = 22
     MaxValue = 10000
     MinValue = 1
@@ -119,7 +126,7 @@ object Form3: TForm3
   object SpinEdit4: TSpinEdit
     Left = 504
     Top = 176
-    Width = 96
+    Width = 94
     Height = 22
     MaxValue = 10000
     MinValue = 1
@@ -148,8 +155,8 @@ object Form3: TForm3
     TabOrder = 6
   end
   object Button3: TButton
-    Left = 504
-    Top = 208
+    Left = 496
+    Top = 272
     Width = 96
     Height = 25
     Caption = 'Full image'
@@ -179,5 +186,19 @@ object Form3: TForm3
     Position = 255
     TabOrder = 8
     OnChange = TrackBar2Change
+  end
+  object ComboBox6: TComboBox
+    Left = 504
+    Top = 220
+    Width = 94
+    Height = 21
+    ItemHeight = 13
+    TabOrder = 9
+    Text = '1/1'
+    Items.Strings = (
+      '1/2'
+      '1/4'
+      '2/1'
+      '4/1')
   end
 end
