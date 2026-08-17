@@ -75,6 +75,26 @@ Current chip-select lines: TFT `GPIO5`, touch `GPIO22`, microSD `GPIO27`.
 | UART2 TX | GPIO17 |
 | GND | GND |
 
+### GPIO summary
+
+| GPIO | TFT | TOUCH | SD | SPK |
+| --- | --- | --- | --- | --- |
+| GPIO4 | RST | — | — | — |
+| GPIO5 | CS | — | — | — |
+| GPIO18 | SCK | TCK | SCK | — |
+| GPIO19 | — | TDO | MISO | — |
+| GPIO21 | D/C | — | — | — |
+| GPIO22 | — | TCS | — | — |
+| GPIO23 | SDI | TDI | MOSI | — |
+| GPIO25 | — | — | — | Signal |
+| GPIO27 | — | — | CS | — |
+| GPIO32 | BL | — | — | — |
+| GPIO34 | — | PEN | — | — |
+
+`GPIO25` is reserved for an optional speaker or buzzer output. For a passive piezo buzzer, speaker or any load requiring more than a small GPIO current, use a transistor/MOSFET driver and a shared GND; do not drive a low-impedance speaker directly from the ESP32 pin. TFT `SDO` remains disconnected.
+
+`GPIO16` and `GPIO17` remain assigned to GUI UART RX/TX, and `GPIO2` remains reserved for the onboard heartbeat LED.
+
 Default baud rate: `115200`.
 
 USB Serial accepts the same commands, which is convenient for testing from the PlatformIO monitor. When Wi-Fi is connected, GUI commands are also accepted over UDP port `4210`.
