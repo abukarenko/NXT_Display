@@ -6,6 +6,7 @@
 #include <TJpg_Decoder.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <WebServer.h>
 #include <Preferences.h>
 #include "gui_fonts.h"
 
@@ -53,7 +54,7 @@ constexpr uint8_t TOUCH_IRQ_PIN = TOUCH_IRQ;
 constexpr uint8_t UI_UART_RX = 16;
 constexpr uint8_t UI_UART_TX = 17;
 constexpr uint8_t SD_CS_PIN = 27;
-constexpr uint32_t SD_SPI_FREQUENCY = 4000000;
+constexpr uint32_t SD_SPI_FREQUENCY = 8000000;
 constexpr uint32_t UI_UART_BAUD = 115200;
 constexpr uint16_t GUI_UDP_PORT = 4210;
 // Leave headroom for long JPG paths, labels and future UDP commands. The
@@ -72,6 +73,14 @@ constexpr char OTA_HOSTNAME[] = "nxt-display";
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 5000;
 constexpr uint32_t TOUCH_POLL_INTERVAL_MS = 25;
 constexpr char STARTUP_CONFIG_PATH[] = "/startup.txt";
+constexpr char PRIMARY_WIFI_CONFIG_PATH[] = "/system/wifi.ini";
+constexpr char PRIMARY_WIFI_TEMP_PATH[] = "/system/wifi.tmp";
+constexpr char PRIMARY_WIFI_BACKUP_PATH[] = "/system/wifi.bak";
+constexpr char DESIGNER_ZIP_PATH[] = "/software/ESP-Display-Designer-Windows.zip";
+constexpr char DESIGNER_ZIP_TEMP_PATH[] = "/software/ESP-Display-Designer-Windows.tmp";
+constexpr char DESIGNER_ZIP_BACKUP_PATH[] = "/software/ESP-Display-Designer-Windows.bak";
+constexpr char WIFI_AP_SSID[] = "ESP-Display";
+constexpr char WIFI_AP_PASSWORD[] = "espdisplay";
 constexpr char WIFI_PREF_NAMESPACE[] = "nxtwifi";
 constexpr char WIFI_PREF_LAST_SSID[] = "last_ssid";
 constexpr size_t STARTUP_WIFI_COUNT = 3;
@@ -102,6 +111,7 @@ const StaticWifiCredential STATIC_WIFI[STARTUP_WIFI_COUNT] = {
 };
 
 StartupWifiCredential startupWifi[STARTUP_WIFI_COUNT];
+StartupWifiCredential primaryWifi;
 char lastWifiSsid[STARTUP_TEXT_SIZE];
 bool startupConfigLoaded = false;
 bool startupScreenAvailable = false;
@@ -158,6 +168,7 @@ struct SceneLine {
 
 HardwareSerial UiSerial(2);
 WiFiUDP GuiUdp;
+WebServer HttpServer(80);
 char usbCommand[COMMAND_BUFFER_SIZE];
 char uartCommand[COMMAND_BUFFER_SIZE];
 char udpCommand[COMMAND_BUFFER_SIZE];
@@ -167,6 +178,8 @@ bool otaReady = false;
 bool otaInProgress = false;
 bool sdReady = false;
 bool udpReady = false;
+bool httpReady = false;
+bool wifiAccessPointMode = false;
 bool udpEventPeerReady = false;
 bool resetRequested = false;
 uint32_t resetAtMs = 0;
@@ -175,9 +188,17 @@ uint16_t udpEventPeerPort = 0;
 uint16_t currentScreenColor = TFT_BLACK;
 bool screenFillActive = false;
 File sdUploadFile;
+File httpDesignerUploadFile;
 String sdUploadPath;
 size_t sdUploadExpectedSize = 0;
 size_t sdUploadWrittenSize = 0;
+size_t httpDesignerUploadSize = 0;
+size_t httpDesignerUploadExpectedSize = 0;
+size_t httpDesignerUploadRequestOffset = 0;
+size_t httpDesignerUploadRequestSize = 0;
+bool httpDesignerUploadOk = false;
+bool httpDesignerUploadComplete = false;
+String httpDesignerUploadError;
 bool jpegClipActive = false;
 int16_t jpegClipX = 0;
 int16_t jpegClipY = 0;
@@ -280,11 +301,20 @@ void drawTrackBarDirty(UiTouchControl &control, int oldValue, int newValue);
 void drawAlignedTextBox(const char *text, int x, int y, int w, int h, uint16_t color,
                         uint16_t background, int font, char hAlign, char vAlign,
                         bool fillBackground);
-bool processCommand(char *line, Print &reply);
+bool processCommand(char *line, Print &reply, bool allowWifiWrite = false);
 bool loadStartupConfig();
+bool ensureSdParentDirectory(const String &path);
 void runStartupScreenScript();
 void drawWifiStatus(const char *line1, const char *line2, uint16_t color);
 void resetScene();
+
+const char DOWNLOAD_PAGE[] PROGMEM = R"HTML(<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP Display</title><style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0f14;color:#eaf2ff;font:18px system-ui,sans-serif}
+a{display:inline-block;padding:16px 22px;border:1px solid #39d0b3;border-radius:8px;color:#39d0b3;text-decoration:none}
+a:hover{background:#39d0b3;color:#07100e}
+</style></head><body><a href="/download/designer">Download ESP-Display-Designer</a></body></html>)HTML";
 
 void resetSceneLines()
 {
@@ -746,6 +776,8 @@ void printHelp(Print &stream)
   stream.println("    Reply with ready.");
   stream.println("  SHOWIP");
   stream.println("    Reply with current Wi-Fi IP and UDP port.");
+  stream.println("  WIFI|ssid|password");
+  stream.println("    Save /system/wifi.ini from USB/UART only; takes effect after restart.");
   stream.println("  RESET");
   stream.println("    Reply OK and restart ESP after a short delay.");
   stream.println("  SS");
@@ -807,7 +839,9 @@ void printHelp(Print &stream)
   stream.println("  JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH");
   stream.println("    Draw a JPEG or selected source area. Scale: 1/4, 1/2, 1/1, 2/1, 4/1.");
   stream.println("    Example: JPG|1|20|20|/icons/play.jpg|1/2|0|0|64|64");
-  stream.println("  FW|path|size, FD|hex, FDO|offset|hex, FE");
+  stream.println("  BIT|id|x|y|path|mask|srcX|srcY|srcW|srcH");
+  stream.println("    Draw a BTM1 RGB565 bitmap. Mask: none or transparent RGB565 color (0xNNNN).");
+  stream.println("  FW|path|size[|offset], FD|hex, FDO|offset|hex, FP, FE");
   stream.println("    Write a file to microSD through serial.");
   stream.println("  SC|path");
   stream.println("    Run a text script from microSD. Example: SC|/scripts/demo.nxt");
@@ -1241,6 +1275,94 @@ bool drawSdJpeg(int id, int x, int y, const char *path, const char *scaleText,
   return true;
 }
 
+// BTM1: 12-byte header ("BTM1", width LE16, height LE16, flags LE16,
+// reserved LE16), followed by row-major RGB565 pixels in TFT wire order
+// (most-significant byte first). This lets a row be read from SD and pushed
+// to the display without JPEG decoding or per-pixel byte swapping.
+bool drawSdBitmap(int id, int x, int y, const char *path, bool maskEnabled, uint16_t maskColor,
+                  int srcX, int srcY, int srcW, int srcH, Print &reply)
+{
+  constexpr size_t BTM_HEADER_SIZE = 12;
+  static uint16_t rowPixels[480];
+
+  if (!sdReady) {
+    reply.println("ERR|bit|sd_not_ready");
+    return false;
+  }
+  if (path == nullptr || path[0] == '\0') {
+    reply.println("ERR|bit|missing_path");
+    return false;
+  }
+
+  String resolvedPath = path[0] == '/' ? String(path) : String('/') + path;
+  File file = SD.open(resolvedPath, FILE_READ);
+  if (!file) {
+    reply.print("ERR|bit|not_found|");
+    reply.println(resolvedPath);
+    return false;
+  }
+
+  uint8_t header[BTM_HEADER_SIZE];
+  if (file.read(header, sizeof(header)) != sizeof(header) || memcmp(header, "BTM1", 4) != 0) {
+    file.close();
+    reply.print("ERR|bit|format|");
+    reply.println(resolvedPath);
+    return false;
+  }
+  uint16_t bitmapWidth = static_cast<uint16_t>(header[4] | (header[5] << 8));
+  uint16_t bitmapHeight = static_cast<uint16_t>(header[6] | (header[7] << 8));
+  size_t expectedSize = BTM_HEADER_SIZE + static_cast<size_t>(bitmapWidth) * bitmapHeight * 2;
+  size_t actualSize = file.size();
+  if (bitmapWidth == 0 || bitmapHeight == 0 || actualSize < expectedSize) {
+    file.close();
+    reply.printf("ERR|bit|size|%u|%u|%s\n", static_cast<unsigned>(actualSize),
+                 static_cast<unsigned>(expectedSize), resolvedPath.c_str());
+    return false;
+  }
+
+  srcX = constrain(srcX, 0, static_cast<int>(bitmapWidth));
+  srcY = constrain(srcY, 0, static_cast<int>(bitmapHeight));
+  if (srcW <= 0) srcW = bitmapWidth - srcX;
+  if (srcH <= 0) srcH = bitmapHeight - srcY;
+  srcW = min(srcW, static_cast<int>(bitmapWidth) - srcX);
+  srcH = min(srcH, static_cast<int>(bitmapHeight) - srcY);
+
+  int skipLeft = max(0, -x);
+  int skipTop = max(0, -y);
+  int drawWidth = min(srcW - skipLeft, tft.width() - max(0, x));
+  int drawHeight = min(srcH - skipTop, tft.height() - max(0, y));
+  if (drawWidth <= 0 || drawHeight <= 0) {
+    file.close();
+    return true;
+  }
+  drawWidth = min(drawWidth, static_cast<int>(sizeof(rowPixels) / sizeof(rowPixels[0])));
+  int drawX = max(0, x);
+  int drawY = max(0, y);
+  int readX = srcX + skipLeft;
+  int readY = srcY + skipTop;
+
+  for (int row = 0; row < drawHeight; ++row) {
+    size_t offset = BTM_HEADER_SIZE +
+                    (static_cast<size_t>(readY + row) * bitmapWidth + readX) * 2;
+    if (!file.seek(offset) || file.read(reinterpret_cast<uint8_t *>(rowPixels), drawWidth * 2) != drawWidth * 2) {
+      file.close();
+      reply.printf("ERR|bit|read|%d|%s\n", row, resolvedPath.c_str());
+      return false;
+    }
+    if (maskEnabled) {
+      tft.pushImage(drawX, drawY + row, drawWidth, 1, rowPixels, maskColor);
+    } else {
+      tft.pushImage(drawX, drawY + row, drawWidth, 1, rowPixels);
+    }
+    if ((row & 15) == 15) yield();
+  }
+
+  file.close();
+  Serial.printf("GUI bitmap file %d rendered path=%s %ux%u mask=%s\n", id, resolvedPath.c_str(),
+                bitmapWidth, bitmapHeight, maskEnabled ? "on" : "none");
+  return true;
+}
+
 bool ensureSdParentDirectory(const String &path)
 {
   int slash = path.lastIndexOf('/');
@@ -1283,7 +1405,7 @@ int hexNibble(char value)
   return -1;
 }
 
-bool beginSdUpload(const char *path, size_t expectedSize, Print &reply)
+bool beginSdUpload(const char *path, size_t expectedSize, size_t resumeOffset, Print &reply)
 {
   if (!sdReady) {
     reply.println("ERR|fw|sd_not_ready");
@@ -1300,7 +1422,7 @@ bool beginSdUpload(const char *path, size_t expectedSize, Print &reply)
 
   sdUploadPath = path[0] == '/' ? String(path) : String('/') + path;
   sdUploadExpectedSize = expectedSize;
-  sdUploadWrittenSize = 0;
+  sdUploadWrittenSize = resumeOffset;
 
   if (!ensureSdParentDirectory(sdUploadPath)) {
     reply.print("ERR|fw|mkdir|");
@@ -1308,18 +1430,45 @@ bool beginSdUpload(const char *path, size_t expectedSize, Print &reply)
     return false;
   }
 
-  if (SD.exists(sdUploadPath)) {
-    SD.remove(sdUploadPath);
+  if (resumeOffset == 0) {
+    if (SD.exists(sdUploadPath)) {
+      SD.remove(sdUploadPath);
+    }
+    sdUploadFile = SD.open(sdUploadPath, FILE_WRITE);
+  } else {
+    File existing = SD.open(sdUploadPath, FILE_READ);
+    size_t existingSize = existing ? existing.size() : 0;
+    if (existing) {
+      existing.close();
+    }
+    if (existingSize != resumeOffset || (expectedSize != 0 && resumeOffset > expectedSize)) {
+      reply.printf("ERR|fw|resume|%u|%u\n", static_cast<unsigned>(resumeOffset),
+                   static_cast<unsigned>(existingSize));
+      return false;
+    }
+    sdUploadFile = SD.open(sdUploadPath, FILE_APPEND);
   }
-
-  sdUploadFile = SD.open(sdUploadPath, FILE_WRITE);
   if (!sdUploadFile) {
     reply.print("ERR|fw|open|");
     reply.println(sdUploadPath);
     return false;
   }
 
-  reply.printf("OK|FW|%s|%u\n", sdUploadPath.c_str(), static_cast<unsigned>(sdUploadExpectedSize));
+  reply.printf("OK|FW|%s|%u|%u\n", sdUploadPath.c_str(), static_cast<unsigned>(sdUploadExpectedSize),
+               static_cast<unsigned>(sdUploadWrittenSize));
+  return true;
+}
+
+bool pauseSdUpload(Print &reply)
+{
+  if (!sdUploadFile) {
+    reply.println("ERR|fp|not_open");
+    return false;
+  }
+  sdUploadFile.flush();
+  sdUploadFile.close();
+  reply.printf("OK|FP|%s|%u|%u\n", sdUploadPath.c_str(), static_cast<unsigned>(sdUploadWrittenSize),
+               static_cast<unsigned>(sdUploadExpectedSize));
   return true;
 }
 
@@ -1619,6 +1768,122 @@ void clearStartupWifi()
   }
 }
 
+bool loadPrimaryWifiConfig()
+{
+  primaryWifi.ssid[0] = '\0';
+  primaryWifi.password[0] = '\0';
+
+  if (!sdReady) {
+    return false;
+  }
+
+  if (!SD.exists(PRIMARY_WIFI_CONFIG_PATH)) {
+    Serial.printf("Primary Wi-Fi config not found: %s\n", PRIMARY_WIFI_CONFIG_PATH);
+    return false;
+  }
+
+  File config = SD.open(PRIMARY_WIFI_CONFIG_PATH, FILE_READ);
+  if (!config) {
+    Serial.printf("Primary Wi-Fi config cannot be opened: %s\n", PRIMARY_WIFI_CONFIG_PATH);
+    return false;
+  }
+
+  while (config.available()) {
+    String line = trimStartupLine(config.readStringUntil('\n'));
+    if (line.length() == 0 || line[0] == ';' || line[0] == '#') {
+      continue;
+    }
+    int equalsPos = line.indexOf('=');
+    if (equalsPos < 0) {
+      continue;
+    }
+    String key = trimStartupLine(line.substring(0, equalsPos));
+    String value = trimStartupLine(line.substring(equalsPos + 1));
+    key.toUpperCase();
+    if (key == "SSID") {
+      setStartupText(primaryWifi.ssid, sizeof(primaryWifi.ssid), value);
+    } else if (key == "PASS" || key == "PASSWORD") {
+      setStartupText(primaryWifi.password, sizeof(primaryWifi.password), value);
+    }
+  }
+  config.close();
+
+  if (primaryWifi.ssid[0] == '\0') {
+    Serial.printf("Primary Wi-Fi config has no SSID: %s\n", PRIMARY_WIFI_CONFIG_PATH);
+    return false;
+  }
+  Serial.printf("Primary Wi-Fi config loaded: SSID=%s\n", primaryWifi.ssid);
+  return true;
+}
+
+bool validWifiField(const char *value, size_t maxLength, bool allowEmpty)
+{
+  if (value == nullptr) {
+    return allowEmpty;
+  }
+  size_t length = strlen(value);
+  if ((!allowEmpty && length == 0) || length > maxLength) {
+    return false;
+  }
+  for (size_t i = 0; i < length; ++i) {
+    if (value[i] == '\r' || value[i] == '\n' || value[i] == '|') {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool savePrimaryWifiConfig(const char *ssid, const char *password, Print &reply)
+{
+  if (!sdReady) {
+    reply.println("ERR|WIFI|SD_NOT_READY");
+    return false;
+  }
+  if (!validWifiField(ssid, 32, false) || !validWifiField(password, 63, true)) {
+    reply.println("ERR|WIFI|INVALID_VALUE");
+    return false;
+  }
+  if (!ensureSdParentDirectory(PRIMARY_WIFI_CONFIG_PATH)) {
+    reply.println("ERR|WIFI|MKDIR_FAILED");
+    return false;
+  }
+
+  SD.remove(PRIMARY_WIFI_TEMP_PATH);
+  File config = SD.open(PRIMARY_WIFI_TEMP_PATH, FILE_WRITE);
+  if (!config) {
+    reply.println("ERR|WIFI|OPEN_FAILED");
+    return false;
+  }
+  config.print("SSID=");
+  config.println(ssid);
+  config.print("PASS=");
+  config.println(password ? password : "");
+  config.flush();
+  config.close();
+
+  SD.remove(PRIMARY_WIFI_BACKUP_PATH);
+  bool hadCurrent = SD.exists(PRIMARY_WIFI_CONFIG_PATH);
+  if (hadCurrent && !SD.rename(PRIMARY_WIFI_CONFIG_PATH, PRIMARY_WIFI_BACKUP_PATH)) {
+    SD.remove(PRIMARY_WIFI_TEMP_PATH);
+    reply.println("ERR|WIFI|BACKUP_FAILED");
+    return false;
+  }
+  if (!SD.rename(PRIMARY_WIFI_TEMP_PATH, PRIMARY_WIFI_CONFIG_PATH)) {
+    if (hadCurrent) {
+      SD.rename(PRIMARY_WIFI_BACKUP_PATH, PRIMARY_WIFI_CONFIG_PATH);
+    }
+    reply.println("ERR|WIFI|SAVE_FAILED");
+    return false;
+  }
+  SD.remove(PRIMARY_WIFI_BACKUP_PATH);
+  strlcpy(primaryWifi.ssid, ssid, sizeof(primaryWifi.ssid));
+  strlcpy(primaryWifi.password, password ? password : "", sizeof(primaryWifi.password));
+  Serial.printf("Primary Wi-Fi config saved: SSID=%s\n", primaryWifi.ssid);
+  reply.print("OK|WIFI|");
+  reply.println(primaryWifi.ssid);
+  return true;
+}
+
 bool loadStartupConfig()
 {
   clearStartupWifi();
@@ -1890,6 +2155,10 @@ const char *findPasswordForSsid(const char *ssid)
     return nullptr;
   }
 
+  if (primaryWifi.ssid[0] != '\0' && strcmp(primaryWifi.ssid, ssid) == 0) {
+    return primaryWifi.password;
+  }
+
   for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) {
     if (startupWifi[i].ssid[0] != '\0' && strcmp(startupWifi[i].ssid, ssid) == 0) {
       return startupWifi[i].password;
@@ -1901,6 +2170,213 @@ const char *findPasswordForSsid(const char *ssid)
     }
   }
   return nullptr;
+}
+
+IPAddress activeWifiIp()
+{
+  return wifiAccessPointMode ? WiFi.softAPIP() : WiFi.localIP();
+}
+
+String activeWifiSsid()
+{
+  return wifiAccessPointMode ? String(WIFI_AP_SSID) : WiFi.SSID();
+}
+
+bool authenticateDesignerUpload()
+{
+  return OTA_PASSWORD[0] != '\0' && HttpServer.authenticate("admin", OTA_PASSWORD);
+}
+
+void failDesignerUpload(const char *message)
+{
+  if (httpDesignerUploadFile) {
+    httpDesignerUploadFile.close();
+  }
+  SD.remove(DESIGNER_ZIP_TEMP_PATH);
+  httpDesignerUploadOk = false;
+  httpDesignerUploadError = message ? message : "upload failed";
+}
+
+void handleDesignerUploadData()
+{
+  if (!authenticateDesignerUpload()) {
+    return;
+  }
+
+  HTTPUpload &upload = HttpServer.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    httpDesignerUploadOk = false;
+    httpDesignerUploadComplete = false;
+    httpDesignerUploadRequestSize = 0;
+    httpDesignerUploadError = "upload incomplete";
+    if (!sdReady) {
+      failDesignerUpload("SD card is not ready");
+      return;
+    }
+    if (!ensureSdParentDirectory(DESIGNER_ZIP_PATH)) {
+      failDesignerUpload("cannot create software directory");
+      return;
+    }
+    httpDesignerUploadRequestOffset = static_cast<size_t>(strtoull(HttpServer.arg("offset").c_str(), nullptr, 10));
+    httpDesignerUploadExpectedSize = static_cast<size_t>(strtoull(HttpServer.arg("total").c_str(), nullptr, 10));
+    if (httpDesignerUploadRequestOffset == 0) {
+      if (httpDesignerUploadFile) {
+        httpDesignerUploadFile.close();
+      }
+      SD.remove(DESIGNER_ZIP_TEMP_PATH);
+      httpDesignerUploadSize = 0;
+      httpDesignerUploadFile = SD.open(DESIGNER_ZIP_TEMP_PATH, FILE_WRITE);
+      if (!httpDesignerUploadFile) {
+        failDesignerUpload("cannot open temporary file");
+        return;
+      }
+    } else {
+      if (!httpDesignerUploadFile || httpDesignerUploadSize != httpDesignerUploadRequestOffset) {
+        failDesignerUpload("upload offset mismatch");
+        return;
+      }
+    }
+    Serial.println("HTTP designer upload started");
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
+    if (!httpDesignerUploadFile) {
+      return;
+    }
+    size_t written = 0;
+    uint8_t retries = 0;
+    while (written < upload.currentSize && retries < 5) {
+      size_t part = httpDesignerUploadFile.write(upload.buf + written, upload.currentSize - written);
+      if (part == 0) {
+        ++retries;
+        delay(10);
+      } else {
+        written += part;
+        retries = 0;
+      }
+      yield();
+    }
+    httpDesignerUploadSize += written;
+    httpDesignerUploadRequestSize += written;
+    if (written != upload.currentSize) {
+      failDesignerUpload("SD write failed");
+    }
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    failDesignerUpload("upload aborted");
+    Serial.println("HTTP designer upload aborted");
+    return;
+  }
+
+  if (upload.status != UPLOAD_FILE_END || !httpDesignerUploadFile) {
+    return;
+  }
+
+  httpDesignerUploadFile.flush();
+  if (httpDesignerUploadRequestSize == 0 || httpDesignerUploadRequestSize != upload.totalSize) {
+    failDesignerUpload("uploaded chunk size mismatch");
+    return;
+  }
+
+  if (httpDesignerUploadExpectedSize > 0 && httpDesignerUploadSize < httpDesignerUploadExpectedSize) {
+    httpDesignerUploadOk = true;
+    httpDesignerUploadComplete = false;
+    httpDesignerUploadError = "";
+    Serial.printf("HTTP designer upload chunk complete: %u/%u bytes\n",
+                  static_cast<unsigned>(httpDesignerUploadSize),
+                  static_cast<unsigned>(httpDesignerUploadExpectedSize));
+    return;
+  }
+  if (httpDesignerUploadExpectedSize > 0 && httpDesignerUploadSize != httpDesignerUploadExpectedSize) {
+    failDesignerUpload("uploaded total size mismatch");
+    return;
+  }
+
+  httpDesignerUploadFile.close();
+
+  SD.remove(DESIGNER_ZIP_BACKUP_PATH);
+  bool hadCurrent = SD.exists(DESIGNER_ZIP_PATH);
+  if (hadCurrent && !SD.rename(DESIGNER_ZIP_PATH, DESIGNER_ZIP_BACKUP_PATH)) {
+    failDesignerUpload("cannot back up existing archive");
+    return;
+  }
+  if (!SD.rename(DESIGNER_ZIP_TEMP_PATH, DESIGNER_ZIP_PATH)) {
+    if (hadCurrent) {
+      SD.rename(DESIGNER_ZIP_BACKUP_PATH, DESIGNER_ZIP_PATH);
+    }
+    failDesignerUpload("cannot install uploaded archive");
+    return;
+  }
+  SD.remove(DESIGNER_ZIP_BACKUP_PATH);
+  httpDesignerUploadOk = true;
+  httpDesignerUploadComplete = true;
+  httpDesignerUploadError = "";
+  Serial.printf("HTTP designer upload complete: %u bytes\n", static_cast<unsigned>(httpDesignerUploadSize));
+}
+
+void finishDesignerUpload()
+{
+  if (!authenticateDesignerUpload()) {
+    HttpServer.requestAuthentication();
+    return;
+  }
+  if (!httpDesignerUploadOk) {
+    String message = httpDesignerUploadError.length() ? httpDesignerUploadError : "upload failed";
+    HttpServer.send(500, "text/plain", message + "\n");
+    return;
+  }
+  String response = String("{\"ok\":true,\"received\":") + httpDesignerUploadSize +
+                    ",\"complete\":" + (httpDesignerUploadComplete ? "true" : "false") + "}";
+  HttpServer.send(200, "application/json", response);
+}
+
+void handleDesignerDownload()
+{
+  if (!sdReady) {
+    HttpServer.send(503, "text/plain", "SD card is not ready\n");
+    return;
+  }
+  if (!SD.exists(DESIGNER_ZIP_PATH)) {
+    HttpServer.send(404, "text/plain", "ESP-Display-Designer archive not found\n");
+    return;
+  }
+  File archive = SD.open(DESIGNER_ZIP_PATH, FILE_READ);
+  if (!archive || archive.isDirectory()) {
+    if (archive) {
+      archive.close();
+    }
+    HttpServer.send(404, "text/plain", "ESP-Display-Designer archive not found\n");
+    return;
+  }
+
+  size_t expected = archive.size();
+  HttpServer.sendHeader("Content-Disposition", "attachment; filename=ESP-Display-Designer-Windows.zip");
+  HttpServer.sendHeader("Cache-Control", "no-store");
+  size_t sent = HttpServer.streamFile(archive, "application/zip");
+  archive.close();
+  Serial.printf("HTTP designer download: %u/%u bytes\n", static_cast<unsigned>(sent),
+                static_cast<unsigned>(expected));
+}
+
+void startHttpServer()
+{
+  HttpServer.on("/", HTTP_GET, []() {
+    HttpServer.send_P(200, "text/html", DOWNLOAD_PAGE);
+  });
+  HttpServer.on("/health", HTTP_GET, []() {
+    HttpServer.send(200, "text/plain", "OK\n");
+  });
+  HttpServer.on("/download/designer", HTTP_GET, handleDesignerDownload);
+  HttpServer.on("/upload/designer", HTTP_POST, finishDesignerUpload, handleDesignerUploadData);
+  HttpServer.onNotFound([]() {
+    HttpServer.send(404, "text/plain", "Not found\n");
+  });
+  HttpServer.begin();
+  httpReady = true;
+  Serial.printf("HTTP download page ready: http://%s/\n", activeWifiIp().toString().c_str());
 }
 
 bool addWifiAttempt(WifiAttempt *attempts, size_t maxAttempts, size_t &count, const char *ssid, const char *password, const char *source)
@@ -1925,9 +2401,12 @@ bool addWifiAttempt(WifiAttempt *attempts, size_t maxAttempts, size_t &count, co
 
 void startOta()
 {
-  constexpr size_t MAX_WIFI_ATTEMPTS = 1 + STARTUP_WIFI_COUNT + STARTUP_WIFI_COUNT;
+  constexpr size_t MAX_WIFI_ATTEMPTS = 2 + STARTUP_WIFI_COUNT + STARTUP_WIFI_COUNT;
   WifiAttempt attempts[MAX_WIFI_ATTEMPTS];
   size_t attemptCount = 0;
+
+  loadPrimaryWifiConfig();
+  addWifiAttempt(attempts, MAX_WIFI_ATTEMPTS, attemptCount, primaryWifi.ssid, primaryWifi.password, "wifi.ini");
 
   bool hasLastWifi = loadLastWifiSsid();
   if (hasLastWifi) {
@@ -1947,14 +2426,12 @@ void startOta()
   }
 
   if (attemptCount == 0) {
-    drawWifiStatus("Wi-Fi not configured", "startup.txt or ota_secrets.h", TFT_RED);
-    Serial.println("OTA disabled: configure startup.txt or include/ota_secrets.h");
-    return;
+    Serial.println("Wi-Fi not configured; starting access point");
+  } else {
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.setHostname(OTA_HOSTNAME);
   }
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.setHostname(OTA_HOSTNAME);
 
   for (size_t i = 0; i < attemptCount && WiFi.status() != WL_CONNECTED; ++i) {
     const char *ssid = attempts[i].ssid;
@@ -1991,13 +2468,24 @@ void startOta()
   }
 
   if (WiFi.status() != WL_CONNECTED) {
-    drawWifiStatus("Wi-Fi failed", "all configured networks", TFT_RED);
-    Serial.println("OTA unavailable: Wi-Fi connection timed out for all configured networks");
-    return;
+    Serial.println("Wi-Fi station unavailable; starting access point");
+    WiFi.disconnect(true, true);
+    delay(100);
+    WiFi.mode(WIFI_AP);
+    wifiAccessPointMode = WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
+    if (!wifiAccessPointMode) {
+      drawWifiStatus("Wi-Fi failed", "station and access point", TFT_RED);
+      Serial.println("Network unavailable: access point start failed");
+      return;
+    }
+    drawWifiStatus("ACCESS POINT", activeWifiIp().toString().c_str(), TFT_YELLOW);
+    Serial.printf("Wi-Fi AP ready: SSID=%s, IP=%s\n", WIFI_AP_SSID, activeWifiIp().toString().c_str());
+    delay(2000);
+  } else {
+    wifiAccessPointMode = false;
+    saveLastWifiSsid(WiFi.SSID().c_str());
+    drawWifiConnected(WiFi.SSID().c_str());
   }
-
-  saveLastWifiSsid(WiFi.SSID().c_str());
-  drawWifiConnected(WiFi.SSID().c_str());
 
   ArduinoOTA.setHostname(OTA_HOSTNAME);
   if (OTA_PASSWORD[0] != '\0') {
@@ -2031,8 +2519,9 @@ void startOta()
   ArduinoOTA.begin();
   otaReady = true;
   udpReady = GuiUdp.begin(GUI_UDP_PORT) == 1;
-  Serial.printf("OTA ready: %s.local, SSID=%s, IP=%s\n", OTA_HOSTNAME, WiFi.SSID().c_str(),
-                WiFi.localIP().toString().c_str());
+  startHttpServer();
+  Serial.printf("OTA ready: %s.local, SSID=%s, IP=%s\n", OTA_HOSTNAME, activeWifiSsid().c_str(),
+                activeWifiIp().toString().c_str());
   Serial.printf("GUI UDP %s: port %u\n", udpReady ? "ready" : "error", GUI_UDP_PORT);
 }
 
@@ -2896,7 +3385,7 @@ void drawStartupScreen()
   tft.fillScreen(TFT_BLACK);
 }
 
-bool processCommand(char *line, Print &reply)
+bool processCommand(char *line, Print &reply, bool allowWifiWrite)
 {
   char original[COMMAND_BUFFER_SIZE];
   strlcpy(original, line, sizeof(original));
@@ -2939,11 +3428,22 @@ bool processCommand(char *line, Print &reply)
     return true;
   }
 
+  if (strcmp(command, "WIFI") == 0) {
+    if (!allowWifiWrite) {
+      reply.println("ERR|WIFI|LOCAL_ONLY");
+      return true;
+    }
+    char *ssid = strtok(nullptr, "|");
+    char *password = strtok(nullptr, "|");
+    return savePrimaryWifiConfig(ssid, password ? password : "", reply);
+  }
+
   if (strcmp(command, "SHOWIP") == 0) {
     reply.print("IP|");
-    reply.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "0.0.0.0");
+    bool networkReady = wifiAccessPointMode || WiFi.status() == WL_CONNECTED;
+    reply.print(networkReady ? activeWifiIp().toString() : "0.0.0.0");
     reply.print("|SSID|");
-    reply.print(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "");
+    reply.print(networkReady ? activeWifiSsid() : "");
     reply.print("|PORT|");
     reply.print(GUI_UDP_PORT);
     reply.print("|HOST|");
@@ -3026,11 +3526,34 @@ bool processCommand(char *line, Print &reply)
     return ok;
   }
 
+  if (strcmp(command, "BIT") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x = parseIntField(strtok(nullptr, "|"));
+    int y = parseIntField(strtok(nullptr, "|"));
+    char *path = strtok(nullptr, "|");
+    char *maskText = strtok(nullptr, "|");
+    int srcX = parseIntField(strtok(nullptr, "|"), 0);
+    int srcY = parseIntField(strtok(nullptr, "|"), 0);
+    int srcW = parseIntField(strtok(nullptr, "|"), 0);
+    int srcH = parseIntField(strtok(nullptr, "|"), 0);
+    bool maskEnabled = maskText != nullptr && maskText[0] != '\0' &&
+                       strcasecmp(maskText, "none") != 0 && strcmp(maskText, "-") != 0;
+    uint16_t maskColor = maskEnabled ? parseColor(maskText, TFT_BLACK) : TFT_BLACK;
+    bool ok = drawSdBitmap(id, x, y, path, maskEnabled, maskColor, srcX, srcY, srcW, srcH, reply);
+    if (ok) {
+      storeSceneLine("BIT", id, original);
+      sendAck(reply, original, true);
+    }
+    return ok;
+  }
+
   if (strcmp(command, "FW") == 0) {
     char *path = strtok(nullptr, "|");
     char *sizeText = strtok(nullptr, "|");
+    char *offsetText = strtok(nullptr, "|");
     size_t expectedSize = sizeText ? static_cast<size_t>(strtoul(sizeText, nullptr, 10)) : 0;
-    return beginSdUpload(path, expectedSize, reply);
+    size_t resumeOffset = offsetText ? static_cast<size_t>(strtoul(offsetText, nullptr, 10)) : 0;
+    return beginSdUpload(path, expectedSize, resumeOffset, reply);
   }
 
   if (strcmp(command, "FD") == 0) {
@@ -3047,6 +3570,10 @@ bool processCommand(char *line, Print &reply)
 
   if (strcmp(command, "FE") == 0) {
     return endSdUpload(reply);
+  }
+
+  if (strcmp(command, "FP") == 0) {
+    return pauseSdUpload(reply);
   }
 
   if (strcmp(command, "SC") == 0) {
@@ -3294,7 +3821,7 @@ bool processCommand(char *line, Print &reply)
   return false;
 }
 
-void readCommandStream(Stream &stream, char *buffer, size_t &length)
+void readCommandStream(Stream &stream, char *buffer, size_t &length, bool allowWifiWrite)
 {
   while (stream.available()) {
     char c = static_cast<char>(stream.read());
@@ -3306,7 +3833,7 @@ void readCommandStream(Stream &stream, char *buffer, size_t &length)
     if (c == '\n') {
       buffer[length] = '\0';
       if (length > 0) {
-        processCommand(buffer, stream);
+        processCommand(buffer, stream, allowWifiWrite);
       }
       length = 0;
       continue;
@@ -3354,9 +3881,19 @@ void readUdpCommands()
     return;
   }
 
+  bool restartUdpAfterReply = strcasecmp(line, "FP") == 0;
   GuiUdp.beginPacket(GuiUdp.remoteIP(), GuiUdp.remotePort());
   processCommand(line, GuiUdp);
   GuiUdp.endPacket();
+  if (restartUdpAfterReply) {
+    udpReady = false;
+    udpEventPeerReady = false;
+    udpEventPeerPort = 0;
+    GuiUdp.stop();
+    delay(25);
+    udpReady = GuiUdp.begin(GUI_UDP_PORT) == 1;
+    Serial.printf("GUI UDP checkpoint restart: %s\n", udpReady ? "ready" : "error");
+  }
 }
 
 void setup()
@@ -3399,7 +3936,7 @@ void setup()
   startOta();
   runStartupScreenScript();
 
-  Serial.println("Commands: ?, HELP, SHOWIP, RESET, SS, TF, FL, SD, LS|path, FS|path, FI|path, RM|path, SL, FR|path|offset|len, FW|path|size, FD|hex, FDO|offset|hex, FE, SC|path, JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V, BX|id|x|y|w|h|fill|outline|radius|line, RR|id|x|y|w|h|fill|outline|radius|line, TX|id|x|y|text|color|bg|font|w|h|H|V, TW|id|x|y|w|h|title|text|fill|outline, TR|id|x|y|w|h|value|max|track|thumb|element, VT|id|x|y|w|h|value|max|track|thumb|element, PB|id|x|y|w|h|percent|fill|background|outline, VP|id|x|y|w|h|percent|fill|background|outline, CC|id|x|y|diameter|fill|outline|line, SW|id|x|y|w|h|0/1|stroke|thumb|fill|element|line, SB|id|x|y|w|h|H/V|value|max|track|thumb|element, BM|id|x|y|name|fg|bg|scale");
+  Serial.println("Commands: ?, HELP, SHOWIP, WIFI|ssid|password (local only), RESET, SS, TF, FL, SD, LS|path, FS|path, FI|path, RM|path, SL, FR|path|offset|len, FW|path|size[|offset], FD|hex, FDO|offset|hex, FP, FE, SC|path, JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH, BIT|id|x|y|path|mask|srcX|srcY|srcW|srcH, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V, BX|id|x|y|w|h|fill|outline|radius|line, RR|id|x|y|w|h|fill|outline|radius|line, TX|id|x|y|text|color|bg|font|w|h|H|V, TW|id|x|y|w|h|title|text|fill|outline, TR|id|x|y|w|h|value|max|track|thumb|element, VT|id|x|y|w|h|value|max|track|thumb|element, PB|id|x|y|w|h|percent|fill|background|outline, VP|id|x|y|w|h|percent|fill|background|outline, CC|id|x|y|diameter|fill|outline|line, SW|id|x|y|w|h|0/1|stroke|thumb|fill|element|line, SB|id|x|y|w|h|H/V|value|max|track|thumb|element, BM|id|x|y|name|fg|bg|scale");
   sendReady(Serial);
   sendReady(UiSerial);
 }
@@ -3424,7 +3961,10 @@ void loop()
     ESP.restart();
   }
   updateTouchButtons();
-  readCommandStream(Serial, usbCommand, usbCommandLength);
-  readCommandStream(UiSerial, uartCommand, uartCommandLength);
+  if (httpReady) {
+    HttpServer.handleClient();
+  }
+  readCommandStream(Serial, usbCommand, usbCommandLength, true);
+  readCommandStream(UiSerial, uartCommand, uartCommandLength, true);
   readUdpCommands();
 }

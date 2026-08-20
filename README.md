@@ -94,9 +94,12 @@ Colors are RGB565 values. You can send decimal values or hex values such as `0x0
 | `TX|id|x|y|text|color|background|font|w|h|H|V` | Draw text label |
 | `BM|id|x|y|name|foreground|background|scale` | Draw built-in bitmap |
 | `JPG|id|x|y|path|scale` | Draw a JPEG file from microSD; scale is 1, 2, 4, or 8 |
+| `BIT|id|x|y|path|mask|srcX|srcY|srcW|srcH` | Draw a BTM1 RGB565 bitmap from `/bitmap`; mask is `none` or a transparent RGB565 color |
 | `SC|path` | Run a text script from microSD |
 | `SD` | Show microSD status and capacity |
 | `LS|path` | List files in a microSD directory |
+| `SHOWIP` | Show current IP address, SSID, UDP port, and hostname |
+| `WIFI|ssid|password` | Save `/system/wifi.ini` from USB Serial or UART2 only |
 | `BL|1` / `BL|0` | Backlight on/off |
 | `IV|1` / `IV|0` | Display inversion on/off |
 
@@ -111,6 +114,10 @@ Built-in bitmap names:
 | `wifi` | Wi-Fi icon |
 
 Use background color `0x0001` to keep bitmap or text background transparent.
+
+BTM1 files contain a 12-byte header (`BTM1`, little-endian width and height,
+flags and reserved words) followed by row-major RGB565 pixels, most-significant
+byte first. A full 480 x 320 image occupies 307,212 bytes including the header.
 
 The startup demo is stored as command strings in firmware and is executed through the same parser as USB Serial and UART2 input. This keeps the built-in demo behavior aligned with the external protocol.
 
@@ -141,6 +148,8 @@ Recommended layout:
 tools/GUI_Maker/sd/icons    -> /icons
 tools/GUI_Maker/sd/images   -> /images
 tools/GUI_Maker/sd/scripts  -> /scripts
+tools/GUI_Maker/sd/system   -> /system
+tools/GUI_Maker/sd/software -> /software
 ```
 
 Scripts are plain text files with one GUI command per line. Empty lines and
@@ -156,9 +165,55 @@ SC|/scripts/demo.nxt
 C:\Users\basachka\.platformio\penv\Scripts\pio.exe run
 C:\Users\basachka\.platformio\penv\Scripts\pio.exe run -t upload
 ```
-# OTA updates
+# Wi-Fi, download page, and OTA updates
 
-1. Configure up to three Wi-Fi profiles in `/startup.txt` on the microSD card (see `tools/GUI_Maker/sd/startup.example.txt`). As a fallback, copy `include/ota_secrets.example.h` to `include/ota_secrets.h` and enter `WIFI_SSID_1` through `WIFI_SSID_3`. Empty profiles are skipped; files containing real passwords are ignored by Git.
+The preferred Wi-Fi profile is `/system/wifi.ini` on the microSD card:
+
+```ini
+SSID=mySSID
+PASS=myPass
+```
+
+It can also be written through local USB Serial or UART2. The password is not
+echoed in the response, and the command is not accepted over UDP:
+
+```text
+WIFI|mySSID|myPass
+OK|WIFI|mySSID
+```
+
+Restart the ESP after changing the profile. Connection order is
+`/system/wifi.ini`, the last successful network, profiles from `/startup.txt`,
+then profiles compiled into the ignored `include/ota_secrets.h` file. If none
+connects, the ESP creates access point `ESP-Display` with password `espdisplay`
+at `192.168.4.1`.
+
+When networking is ready, open the IP address shown on the display. The page
+contains one link, **Download ESP-Display-Designer**, which streams this file
+directly from the SD card:
+
+```text
+/software/ESP-Display-Designer-Windows.zip
+```
+
+Useful HTTP addresses are `/`, `/health`, and `/download/designer`.
+
+For initial provisioning, a developer can stream a replacement archive to SD
+without removing the card. The upload uses HTTP Basic authentication with user
+`admin` and the configured OTA password; it is disabled when the OTA password
+is empty. The previous archive remains available if an upload is interrupted:
+
+Large archives are sent in short resumable requests so the slow SPI SD card does
+not hold one HTTP connection open for several minutes:
+
+```powershell
+.\tools\upload-designer.ps1 -EspAddress 192.168.100.200 `
+  -FilePath .\ESP-Display-Designer-Windows.zip -Password OTA_PASSWORD
+```
+
+For OTA updates:
+
+1. Configure Wi-Fi as described above. The older profiles in `/startup.txt` remain supported (see `tools/GUI_Maker/sd/startup.example.txt`). As a fallback, copy `include/ota_secrets.example.h` to `include/ota_secrets.h` and enter `WIFI_SSID_1` through `WIFI_SSID_3`. Empty profiles are skipped; files containing real passwords are ignored by Git.
 2. Upload the firmware once over USB with the `esp32dev` environment.
 3. At startup the display shows each Wi-Fi connection attempt for up to 5 seconds. After a successful connection it shows the selected SSID and IP address. Confirm in the serial monitor that `OTA ready: nxt-display.local` is printed.
 4. Upload subsequent builds with the `esp32dev_ota` environment.

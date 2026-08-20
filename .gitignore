@@ -6,6 +6,8 @@
 include/ota_secrets.h
 tools/GUI_Maker/sd/startup.txt
 tools/GUI_Maker/sd/system/startup.txt
+tools/GUI_Maker/sd/system/wifi.ini
+tools/GUI_Maker/sd/software/*.zip
 tools/GUI_Maker/*.dcu
 tools/GUI_Maker/*.ddp
 tools/GUI_Maker/*.exe
