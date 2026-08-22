@@ -48,11 +48,18 @@
 TFT_eSPI tft;
 
 constexpr uint8_t BACKLIGHT_PIN = TFT_BL;
+constexpr uint8_t BACKLIGHT_PWM_CHANNEL = 2;
+constexpr uint32_t BACKLIGHT_PWM_FREQUENCY = 20000;
+constexpr uint8_t BACKLIGHT_DEFAULT_LEVEL = 255;
 constexpr uint8_t HEARTBEAT_LED_PIN = 2;
 constexpr uint8_t TOUCH_IRQ_PIN = TOUCH_IRQ;
 constexpr uint8_t UI_UART_RX = 16;
 constexpr uint8_t UI_UART_TX = 17;
 constexpr uint8_t SD_CS_PIN = 27;
+constexpr uint8_t SPEAKER_PIN = 25;
+constexpr uint8_t SPEAKER_PWM_CHANNEL = 0;
+constexpr uint32_t SPEAKER_DEFAULT_FREQUENCY = 1000;
+constexpr uint32_t SPEAKER_DEFAULT_DURATION_MS = 500;
 constexpr uint32_t SD_SPI_FREQUENCY = 4000000;
 constexpr uint32_t UI_UART_BAUD = 115200;
 constexpr uint16_t GUI_UDP_PORT = 4210;
@@ -61,6 +68,7 @@ constexpr uint16_t GUI_UDP_PORT = 4210;
 // lines must not be truncated at the UDP boundary.
 constexpr size_t COMMAND_BUFFER_SIZE = 384;
 constexpr uint16_t TOUCH_THRESHOLD = 250;
+constexpr uint16_t TOUCH_MOVE_THRESHOLD = 120;
 constexpr bool DISPLAY_INVERTED = true;
 constexpr bool TOUCH_INVERT_X = true;
 constexpr int16_t TOUCH_LEFT_EDGE_X_CORRECTION = 20;
@@ -68,10 +76,19 @@ constexpr int16_t TOUCH_CENTER_X_CORRECTION = 6;
 constexpr int16_t TOUCH_CENTER_X_CORRECTION_RANGE = 140;
 constexpr uint16_t COLOR_TRANSPARENT = 0x0001;
 constexpr int16_t GFX_FONT_Y_CORRECTION = -3;
-constexpr char OTA_HOSTNAME[] = "nxt-display";
+constexpr char OTA_HOSTNAME[] = "smart-display";
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 5000;
 constexpr uint32_t TOUCH_POLL_INTERVAL_MS = 25;
+constexpr bool TOUCH_SWIPE_DEBUG = false;
+constexpr int16_t SWIPE_MIN_DISTANCE = 60;
+constexpr uint32_t SWIPE_MAX_DURATION_MS = 1800;
+constexpr uint32_t SWIPE_RELEASE_GRACE_MS = 120;
+constexpr uint16_t DISPLAY_SCROLL_LINES = 480;
+constexpr uint16_t DEFAULT_SCROLL_DURATION_MS = 240;
+constexpr uint8_t DISPLAY_SCROLL_FRAMES = 24;
 constexpr char STARTUP_CONFIG_PATH[] = "/startup.txt";
+constexpr char STARTUP_CONFIG_TEMP_PATH[] = "/startup.tmp";
+constexpr char STARTUP_CONFIG_BACKUP_PATH[] = "/startup.bak";
 constexpr char WIFI_PREF_NAMESPACE[] = "nxtwifi";
 constexpr char WIFI_PREF_LAST_SSID[] = "last_ssid";
 constexpr size_t STARTUP_WIFI_COUNT = 3;
@@ -170,6 +187,8 @@ bool udpReady = false;
 bool udpEventPeerReady = false;
 bool resetRequested = false;
 uint32_t resetAtMs = 0;
+bool speakerToneActive = false;
+uint32_t speakerToneStopAt = 0;
 IPAddress udpEventPeerIp;
 uint16_t udpEventPeerPort = 0;
 uint16_t currentScreenColor = TFT_BLACK;
@@ -199,6 +218,14 @@ int pressedTouchControlIndex = -1;
 int currentTouchControlIndex = -1;
 uint16_t lastTouchX = 0;
 uint16_t lastTouchY = 0;
+bool screenSwipeTracking = false;
+uint16_t screenSwipeStartX = 0;
+uint16_t screenSwipeStartY = 0;
+uint16_t screenSwipeLastX = 0;
+uint16_t screenSwipeLastY = 0;
+uint32_t screenSwipeStartedAt = 0;
+uint32_t screenSwipeLastTouchAt = 0;
+bool swipeAutoScrollEnabled = false;
 
 const uint8_t ICON_PLAY[] PROGMEM = {
   0b00000000, 0b00000000,
@@ -270,6 +297,56 @@ const BitmapAsset BITMAP_ASSETS[] = {
   {"wifi", 16, 16, ICON_WIFI}
 };
 
+class NullPrint : public Print {
+public:
+  size_t write(uint8_t) override { return 1; }
+};
+
+NullPrint nullPrint;
+
+const char *const STARTUP_NO_SD_SCRIPT[] = {
+  "CL|0x0841",
+  "RR|100|8|8|464|304|0x1082|0x4D7F|12|2",
+  "TX|101|24|18|SMART DISPLAY - FIRST START|0x07FF|0x1082|4|432|32|C|C",
+  "RR|102|146|55|188|31|0x7800|0xFBE0|7|2",
+  "TX|102|146|55|NO SD CARD|0xFFFF|0x7800|2|188|31|C|C",
+  "TX|103|28|99|1  CONNECT USB|0xFFE0|0x1082|2|196|22|L|C",
+  "TX|104|242|99|Open serial COM at 115200|0xFFFF|0x1082|2|210|22|L|C",
+  "TX|105|28|134|2  PREPARE microSD|0xFFE0|0x1082|2|196|22|L|C",
+  "TX|106|242|134|FAT32 and create /startup.txt|0xFFFF|0x1082|2|210|22|L|C",
+  "TX|107|28|169|3  ADD NETWORK|0xFFE0|0x1082|2|196|22|L|C",
+  "TX|108|242|164|SSID = your_wifi|0xFFFF|0x1082|2|210|18|L|C",
+  "TX|109|242|184|PASS = your_password|0xFFFF|0x1082|2|210|18|L|C",
+  "TX|110|28|219|4  INSERT + RESET|0xFFE0|0x1082|2|196|22|L|C",
+  "TX|111|242|219|SHOWIP, then UDP port 4210|0xFFFF|0x1082|2|210|22|L|C",
+  "PB|112|28|263|424|12|75|0x07E0|0x2104|0x4D7F",
+  "TX|113|28|282|USB commands remain available without SD|0x8410|0x1082|2|424|18|C|C"
+};
+
+const char *const STARTUP_DEMO_SCRIPT[] = {
+  "CL|0x0841",
+  "TX|200|12|8|SMART DISPLAY COMPONENT LAB|0x07FF|0x0841|4|456|32|C|C",
+  "RR|201|10|48|222|258|0x1082|0x4D7F|10|2",
+  "RR|202|242|48|228|258|0x1082|0x4D7F|10|2",
+  "BT|201|24|70|104|42|PRESS ME|0x05FF|0x07FF|0x0000|2|2|C|C",
+  "CC|202|160|68|46|0xFBE0|0xFFFF|2",
+  "BX|203|24|130|88|36|0xF81F|0xFFFF|0|2",
+  "RR|204|130|130|88|36|0x07E0|0xFFFF|10|2",
+  "SW|205|26|190|82|34|1|0x07FF|0xFFFF|0x2104|0x07E0|2",
+  "BM|206|155|185|wifi|0x07FF|0x1082|3",
+  "TX|207|24|245|BUTTON BOX CIRCLE SWITCH BITMAP|0xFFFF|0x1082|2|194|42|C|C",
+  "TW|207|256|61|200|48|STATUS|All systems ready|0x18E3|0x07FF",
+  "TR|208|258|126|160|20|64|100|0x2104|0xFFFF|0x05FF",
+  "VT|209|434|116|18|70|55|100|0x2104|0xFFFF|0xF81F",
+  "PB|210|258|164|160|12|72|0x07E0|0x2104|0x4D7F",
+  "VP|211|434|198|18|70|68|0xFBE0|0x2104|0x4D7F",
+  "SB|212|258|198|150|18|H|42|100|0x2104|0xFFE0|0x05FF",
+  "SB|213|412|198|14|70|V|65|100|0x2104|0xF81F|0x07E0",
+  "BM|214|258|245|play|0x07E0|0x1082|2",
+  "BM|215|300|245|stop|0xF800|0x1082|2",
+  "TX|216|344|244|TR VT PB VP SB|0xFFFF|0x1082|2|102|38|C|C"
+};
+
 void drawScrollBar(int id, int x, int y, int w, int h, char orientation, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element);
 void drawTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element);
 void drawVerticalTrackBar(int id, int x, int y, int w, int h, int value, int maximum, uint16_t track, uint16_t thumb, uint16_t element);
@@ -285,6 +362,54 @@ bool loadStartupConfig();
 void runStartupScreenScript();
 void drawWifiStatus(const char *line1, const char *line2, uint16_t color);
 void resetScene();
+
+void setHardwareScrollStart(uint16_t offset)
+{
+  offset %= DISPLAY_SCROLL_LINES;
+  tft.writecommand(0x37);
+  tft.writedata(static_cast<uint8_t>(offset >> 8));
+  tft.writedata(static_cast<uint8_t>(offset & 0xFF));
+}
+
+void configureFullScreenHardwareScroll()
+{
+  tft.writecommand(0x33);
+  tft.writedata(0); tft.writedata(0);
+  tft.writedata(static_cast<uint8_t>(DISPLAY_SCROLL_LINES >> 8));
+  tft.writedata(static_cast<uint8_t>(DISPLAY_SCROLL_LINES & 0xFF));
+  tft.writedata(0); tft.writedata(0);
+}
+
+void startSpeakerTone(uint32_t frequency, uint32_t durationMs)
+{
+  ledcWriteTone(SPEAKER_PWM_CHANNEL, frequency);
+  speakerToneActive = true;
+  speakerToneStopAt = millis() + durationMs;
+}
+
+void updateSpeakerTone()
+{
+  if (speakerToneActive && static_cast<int32_t>(millis() - speakerToneStopAt) >= 0) {
+    ledcWriteTone(SPEAKER_PWM_CHANNEL, 0);
+    speakerToneActive = false;
+  }
+}
+
+bool animateHardwareScroll(char direction, uint16_t durationMs)
+{
+  if (direction != 'L' && direction != 'R') return false;
+  configureFullScreenHardwareScroll();
+  uint16_t frameDelay = durationMs / DISPLAY_SCROLL_FRAMES;
+  if (frameDelay == 0) frameDelay = 1;
+  for (uint8_t frame = 1; frame <= DISPLAY_SCROLL_FRAMES; ++frame) {
+    uint16_t forward = (static_cast<uint32_t>(frame) * DISPLAY_SCROLL_LINES) / DISPLAY_SCROLL_FRAMES;
+    setHardwareScrollStart(direction == 'L' ? forward % DISPLAY_SCROLL_LINES
+                                             : (DISPLAY_SCROLL_LINES - forward) % DISPLAY_SCROLL_LINES);
+    delay(frameDelay);
+  }
+  setHardwareScrollStart(0);
+  return true;
+}
 
 void resetSceneLines()
 {
@@ -395,6 +520,7 @@ void resetTouchRegistry()
   currentTouchButtonIndex = -1;
   pressedTouchControlIndex = -1;
   currentTouchControlIndex = -1;
+  screenSwipeTracking = false;
 }
 
 void resetScene()
@@ -739,79 +865,121 @@ void sendReady(Print &stream)
 
 void printHelp(Print &stream)
 {
-  stream.println("NXT Display commands (fields are separated by |):");
-  stream.println("  HELP");
-  stream.println("    Show this command list.");
-  stream.println("  ?");
-  stream.println("    Reply with ready.");
-  stream.println("  SHOWIP");
-  stream.println("    Reply with current Wi-Fi IP and UDP port.");
-  stream.println("  RESET");
-  stream.println("    Reply OK and restart ESP after a short delay.");
-  stream.println("  SS");
-  stream.println("    Return current scene snapshot as command lines with live values.");
-  stream.println("  TF" );
-  stream.println("    Show all loaded TFT_eSPI and GFX font samples." );
-  stream.println("  FL" );
-  stream.println("    List SD VLW fonts from /fonts. Font IDs start at 100." );
-  stream.println("  CL|color");
-  stream.println("    Clear screen. Example: CL|0x0000");
-  stream.println("  BL|0/1");
-  stream.println("    Backlight off/on. Example: BL|1");
-  stream.println("  IV|0/1");
-  stream.println("    Display inversion off/on. Example: IV|1");
-  stream.println("  BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V");
-  stream.println("    Draw button. H=L/C/R, V=T/C/B. Optional fields default to 1|2|C|C.");
-  stream.println("    Example: BT|1|20|20|120|50|OK|0x001F|0xFFFF|0xFFFF|2|2|C|C");
-  stream.println("    Touch events: EV|BT|id|DOWN/UP/CLICK|x|y");
-  stream.println("  BX|id|x|y|w|h|fill|outline|radius|line");
-  stream.println("    Draw box. Use fill 0x0001 for no fill.");
-  stream.println("  RR|id|x|y|w|h|fill|outline|radius|line");
-  stream.println("    Draw rounded rectangle. Example: RR|1|10|10|100|40|0x0001|0xFFFF|8|2");
-  stream.println("  TX|id|x|y|text|color|background|font|w|h|H|V");
-  stream.println("    Draw text. Use background 0x0001 for transparency. H=L/C/R, V=T/C/B.");
-  stream.println("    Example: TX|1|20|90|Hello|0xFFFF|0x0001|2|120|30|C|C");
-  stream.println("  TW|id|x|y|w|h|title|text|fill|outline");
-  stream.println("    Draw text window. Use fill 0x0001 for transparent body.");
-  stream.println("  TR|id|x|y|w|h|value|max|track|thumb|element");
-  stream.println("    Draw horizontal trackbar. Element is the filled track color; optional for old scripts.");
-  stream.println("  PB|id|x|y|w|h|percent|fill|background|outline");
-  stream.println("    Draw horizontal progress bar.");
-  stream.println("  CC|id|x|y|diameter|fill|outline|line");
-  stream.println("    Draw circle. Use fill 0x0001 for no fill.");
-  stream.println("  SW|id|x|y|w|h|0/1|stroke|thumb|fill|element|line");
-  stream.println("    Draw switch. Colors: stroke outline, thumb, inactive fill, active fill. Line is 1..4.");
-  stream.println("  SB|id|x|y|w|h|H/V|value|max|track|thumb|element");
-  stream.println("    Draw horizontal or vertical scrollbar.");
-  stream.println("  BM|id|x|y|name|foreground|background|scale");
-  stream.println("    Draw bitmap. Names: play, stop, wifi.");
-  stream.println("    Use background 0x0001 for transparency.");
-  stream.println("  SD");
-  stream.println("    Show microSD status and capacity.");
-  stream.println("  LS|path");
-  stream.println("    List files in a microSD directory. Example: LS|/");
-  stream.println("  FS|path");
-  stream.println("    Show one microSD file size. Example: FS|/lcd2.jpg");
-  stream.println("  FI|path");
-  stream.println("    Show microSD file size and last-write timestamp.");
-  stream.println("  RM|path");
-  stream.println("    Delete one microSD file. Example: RM|/scripts/script1.nxt");
-  stream.println("  SL");
-  stream.println("    List scripts in /scripts. SL|path lists all files in path.");
-  stream.println("  DL" );
-  stream.println("    List microSD root directories for the desktop editor." );
-  stream.println("  FL" );
-  stream.println("    List /fonts/*.vlw as ID/name pairs. Examples: font100.vlw or 100.vlw." );
-  stream.println("  FR|path|offset|len");
-  stream.println("    Read a microSD file chunk as HEX. Example: FR|/scripts/demo.nxt|0|64");
-  stream.println("  JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH");
-  stream.println("    Draw a JPEG or selected source area. Scale: 1/4, 1/2, 1/1, 2/1, 4/1.");
-  stream.println("    Example: JPG|1|20|20|/icons/play.jpg|1/2|0|0|64|64");
-  stream.println("  FW|path|size, FD|hex, FDO|offset|hex, FE");
-  stream.println("    Write a file to microSD through serial.");
-  stream.println("  SC|path");
-  stream.println("    Run a text script from microSD. Example: SC|/scripts/demo.nxt");
-  stream.println("Colors are RGB565 numbers, for example 0x0000 black and 0xFFFF white.");
+  stream.println("Smart Display commands. Fields are separated by |.");
+  stream.println();
+  stream.println("  'HELP'   - Show command list.");
+  stream.println("  '?'      - Reply with ready.");
+  stream.println();
+  stream.println("#system commands:");
+  stream.println("  'SHOWIP' - Show Wi-Fi IP and UDP port.");
+  stream.println("  'RESET'  - Restart ESP.");
+  stream.println("  'SS'     - Return current scene.");
+  stream.println();
+  stream.println("#file commands:");
+  stream.println("  'SD'  - Show SD status.");
+  stream.println("  'LS'  - List directory.");
+  stream.println("  'FS'  - Show file size.");
+  stream.println("  'FI'  - Show file size and date.");
+  stream.println("  'RM'  - Delete file.");
+  stream.println("  'SL'  - List scripts or files.");
+  stream.println("  'DL'  - List root directories.");
+  stream.println("  'FL'  - List VLW fonts.");
+  stream.println("  'FR'  - Read file data as HEX.");
+  stream.println("  'FW'  - Start or resume upload.");
+  stream.println("  'FD'  - Append upload data.");
+  stream.println("  'FDO' - Write upload data at offset.");
+  stream.println("  'FP'  - Pause upload.");
+  stream.println("  'FE'  - Finish upload.");
+  stream.println("  'SC'  - Run script.");
+  stream.println();
+  stream.println("#display commands:");
+  stream.println("  'CL'    - Clear screen.");
+  stream.println("  'SCRLL' - Page-turn animation.");
+  stream.println("  'SPK'   - Generate speaker square wave.");
+  stream.println("  'BL'    - Set backlight brightness.");
+  stream.println("  'IV'    - Inversion off/on.");
+  stream.println("  'TF'    - Show font samples.");
+  stream.println();
+  stream.println("#design commands:");
+  stream.println("  'BT'  - Draw button.");
+  stream.println("  'BX'  - Draw box.");
+  stream.println("  'RR'  - Draw rounded rectangle.");
+  stream.println("  'LN'  - Draw line.");
+  stream.println("  'TX'  - Draw text.");
+  stream.println("  'TW'  - Draw text window.");
+  stream.println("  'TR'  - Draw horizontal trackbar.");
+  stream.println("  'VT'  - Draw vertical trackbar.");
+  stream.println("  'PB'  - Draw horizontal progress.");
+  stream.println("  'VP'  - Draw vertical progress.");
+  stream.println("  'CC'  - Draw circle.");
+  stream.println("  'SW'  - Swipe auto-scroll or switch.");
+  stream.println("  'SB'  - Draw scrollbar.");
+  stream.println("  'JPG' - Draw JPEG image.");
+  stream.println("  'BM'  - Draw bitmap.");
+  stream.println();
+  stream.println("Exact syntax: COMMAND/?  Example: BT/?");
+  stream.println("RGB565: 0x0000 black, 0xFFFF white.");
+}
+
+bool printCommandHelp(Print &stream, const char *command)
+{
+  const char *syntax = nullptr;
+  const char *description = nullptr;
+  if (strcmp(command, "HELP") == 0) { description = "Show this command reference."; syntax = "HELP"; }
+  else if (strcmp(command, "SHOWIP") == 0) { description = "Reply with current Wi-Fi IP and UDP port."; syntax = "SHOWIP"; }
+  else if (strcmp(command, "RESET") == 0) { description = "Restart ESP after a short delay."; syntax = "RESET"; }
+  else if (strcmp(command, "SS") == 0) { description = "Return current scene snapshot with live values."; syntax = "SS"; }
+  else if (strcmp(command, "SD") == 0) { description = "Show microSD status and capacity."; syntax = "SD"; }
+  else if (strcmp(command, "DL") == 0) { description = "List microSD root directories."; syntax = "DL"; }
+  else if (strcmp(command, "FL") == 0) { description = "List SD VLW fonts."; syntax = "FL"; }
+  else if (strcmp(command, "FP") == 0) { description = "Pause the current file upload."; syntax = "FP"; }
+  else if (strcmp(command, "FE") == 0) { description = "Finish and verify the current file upload."; syntax = "FE"; }
+  else if (strcmp(command, "TF") == 0) { description = "Show loaded font samples."; syntax = "TF"; }
+  else if (strcmp(command, "BT") == 0) { description = "Draw button."; syntax = "BT | id | x | y | width | height | label | fill | stroke | text | thick | font | align_h | align_v"; }
+  else if (strcmp(command, "BX") == 0) { description = "Draw box."; syntax = "BX | id | x | y | width | height | fill | stroke | radius | thick"; }
+  else if (strcmp(command, "RR") == 0) { description = "Draw rounded rectangle."; syntax = "RR | id | x | y | width | height | fill | stroke | radius | thick"; }
+  else if (strcmp(command, "LN") == 0) { description = "Draw line."; syntax = "LN | id | x1 | y1 | x2 | y2 | thick | color"; }
+  else if (strcmp(command, "TX") == 0) { description = "Draw text."; syntax = "TX | id | x | y | text | color | background | font | width | height | align_h | align_v"; }
+  else if (strcmp(command, "TW") == 0) { description = "Draw text window."; syntax = "TW | id | x | y | width | height | title | text | fill | stroke"; }
+  else if (strcmp(command, "TR") == 0) { description = "Draw horizontal trackbar."; syntax = "TR | id | x | y | width | height | value | max | track | thumb | element"; }
+  else if (strcmp(command, "VT") == 0) { description = "Draw vertical trackbar."; syntax = "VT | id | x | y | width | height | value | max | track | thumb | element"; }
+  else if (strcmp(command, "PB") == 0) { description = "Draw horizontal progress bar."; syntax = "PB | id | x | y | width | height | percent | fill | background | stroke"; }
+  else if (strcmp(command, "VP") == 0) { description = "Draw vertical progress bar."; syntax = "VP | id | x | y | width | height | percent | fill | background | stroke"; }
+  else if (strcmp(command, "CC") == 0) { description = "Draw circle."; syntax = "CC | id | x | y | diameter | fill | stroke | thick"; }
+  else if (strcmp(command, "SW") == 0) { description = "Set swipe auto-scroll or draw switch."; syntax = "SW | 0/1  OR  SW | id | x | y | width | height | state | stroke | thumb | fill | element | thick"; }
+  else if (strcmp(command, "SB") == 0) { description = "Draw horizontal or vertical scrollbar."; syntax = "SB | id | x | y | width | height | H/V | value | max | track | thumb | element"; }
+  else if (strcmp(command, "JPG") == 0) { description = "Draw JPEG image."; syntax = "JPG | id | x | y | path | scale | srcX | srcY | srcW | srcH"; }
+  else if (strcmp(command, "BM") == 0) { description = "Draw built-in bitmap."; syntax = "BM | id | x | y | name | foreground | background | scale"; }
+  else if (strcmp(command, "CL") == 0) { description = "Clear screen."; syntax = "CL | color"; }
+  else if (strcmp(command, "SCRLL") == 0) { description = "Hardware page-turn animation."; syntax = "SCRLL | L/R | duration_ms"; }
+  else if (strcmp(command, "SPK") == 0) { description = "Generate square wave on GPIO25."; syntax = "SPK [| frequency_hz | duration_ms]  Defaults: 1000 Hz, 500 ms"; }
+  else if (strcmp(command, "BL") == 0) { description = "Set GPIO32 backlight PWM brightness."; syntax = "BL | light   light: 0..255"; }
+  else if (strcmp(command, "IV") == 0) { description = "Switch display inversion off or on."; syntax = "IV | 0/1"; }
+  else if (strcmp(command, "LS") == 0) { description = "List files in a microSD directory."; syntax = "LS | path"; }
+  else if (strcmp(command, "FS") == 0) { description = "Show one microSD file size."; syntax = "FS | path"; }
+  else if (strcmp(command, "FI") == 0) { description = "Show file size and last-write timestamp."; syntax = "FI | path"; }
+  else if (strcmp(command, "RM") == 0) { description = "Delete one microSD file."; syntax = "RM | path"; }
+  else if (strcmp(command, "SL") == 0) { description = "List scripts or files in a path."; syntax = "SL [| path]"; }
+  else if (strcmp(command, "FR") == 0) { description = "Read a microSD file chunk as HEX."; syntax = "FR | path | offset | length"; }
+  else if (strcmp(command, "FW") == 0) { description = "Start or resume a microSD file upload."; syntax = "FW | path | size [| resume_offset]"; }
+  else if (strcmp(command, "FD") == 0) { description = "Append HEX data to the current upload."; syntax = "FD | hex"; }
+  else if (strcmp(command, "FDO") == 0) { description = "Write HEX data at a file offset."; syntax = "FDO | offset | hex"; }
+  else if (strcmp(command, "SC") == 0) { description = "Run a text script from microSD."; syntax = "SC | path"; }
+  if (syntax == nullptr) {
+    stream.print("ERR|HELP|UNKNOWN_COMMAND|");
+    stream.println(command);
+    return false;
+  }
+
+  stream.print('\''); stream.print(command); stream.print("' - "); stream.println(description);
+  stream.println();
+  stream.println(syntax);
+  if (strcmp(command, "BT") == 0 || strcmp(command, "TX") == 0) {
+    stream.println("align_h: L=left, C=center, R=right.");
+    stream.println("align_v: T=top, C=center, B=bottom.");
+  }
+  stream.println("Spaces around | are shown only for readability.");
+  return true;
 }
 
 void printSdStatus(Print &stream)
@@ -1283,7 +1451,7 @@ int hexNibble(char value)
   return -1;
 }
 
-bool beginSdUpload(const char *path, size_t expectedSize, Print &reply)
+bool beginSdUpload(const char *path, size_t expectedSize, size_t resumeOffset, Print &reply)
 {
   if (!sdReady) {
     reply.println("ERR|fw|sd_not_ready");
@@ -1298,7 +1466,33 @@ bool beginSdUpload(const char *path, size_t expectedSize, Print &reply)
     sdUploadFile.close();
   }
 
-  sdUploadPath = path[0] == '/' ? String(path) : String('/') + path;
+  String requestedPath = path[0] == '/' ? String(path) : String('/') + path;
+  if (resumeOffset > 0) {
+    if (requestedPath != sdUploadPath || expectedSize != sdUploadExpectedSize ||
+        resumeOffset != sdUploadWrittenSize || !SD.exists(requestedPath)) {
+      reply.printf("ERR|fw|resume|%u|%u\n", static_cast<unsigned>(resumeOffset),
+                   static_cast<unsigned>(sdUploadWrittenSize));
+      return false;
+    }
+    File existing = SD.open(requestedPath, FILE_READ);
+    size_t actualSize = existing ? existing.size() : 0;
+    if (existing) existing.close();
+    if (actualSize != resumeOffset) {
+      reply.printf("ERR|fw|resume_size|%u|%u\n", static_cast<unsigned>(actualSize),
+                   static_cast<unsigned>(resumeOffset));
+      return false;
+    }
+    sdUploadFile = SD.open(requestedPath, FILE_APPEND);
+    if (!sdUploadFile) {
+      reply.println("ERR|fw|resume_open");
+      return false;
+    }
+    reply.printf("OK|FW|%s|%u|%u\n", requestedPath.c_str(),
+                 static_cast<unsigned>(expectedSize), static_cast<unsigned>(resumeOffset));
+    return true;
+  }
+
+  sdUploadPath = requestedPath;
   sdUploadExpectedSize = expectedSize;
   sdUploadWrittenSize = 0;
 
@@ -1539,7 +1733,7 @@ bool runSdScript(const char *path, Print &reply)
 
     char commandBuffer[COMMAND_BUFFER_SIZE];
     strlcpy(commandBuffer, start, sizeof(commandBuffer));
-    if (!processCommand(commandBuffer, reply)) {
+    if (!processCommand(commandBuffer, nullPrint)) {
       reply.printf("ERR|script|line|%lu|%s\n", static_cast<unsigned long>(lineNumber), start);
       return false;
     }
@@ -1579,13 +1773,14 @@ bool runSdScript(const char *path, Print &reply)
   return ok;
 }
 
-void setBacklight(bool enabled)
+void setBacklight(uint8_t light)
 {
   if (BACKLIGHT_PIN == 255) {
     return;
   }
 
-  digitalWrite(BACKLIGHT_PIN, enabled ? TFT_BACKLIGHT_ON : !TFT_BACKLIGHT_ON);
+  uint8_t duty = TFT_BACKLIGHT_ON == HIGH ? light : static_cast<uint8_t>(255 - light);
+  ledcWrite(BACKLIGHT_PWM_CHANNEL, duty);
 }
 
 void blinkBacklightAtBoot()
@@ -1594,13 +1789,23 @@ void blinkBacklightAtBoot()
     return;
   }
 
-  setBacklight(true);
+  setBacklight(BACKLIGHT_DEFAULT_LEVEL);
 }
 
 String trimStartupLine(String line)
 {
   line.trim();
   return line;
+}
+
+void runBuiltinScript(const char *const *script, size_t count)
+{
+  for (size_t i = 0; i < count; ++i) {
+    char commandBuffer[COMMAND_BUFFER_SIZE];
+    strlcpy(commandBuffer, script[i], sizeof(commandBuffer));
+    if (!processCommand(commandBuffer, Serial))
+      Serial.printf("Built-in startup command failed %u: %s\n", static_cast<unsigned>(i + 1), script[i]);
+  }
 }
 
 void setStartupText(char *dest, size_t destSize, const String &value)
@@ -1691,13 +1896,88 @@ bool loadStartupConfig()
   return startupConfigLoaded || startupScreenAvailable;
 }
 
+bool promoteSuccessfulStartupWifi(const char *connectedSsid)
+{
+  if (!sdReady || !startupConfigLoaded || connectedSsid == nullptr) return false;
+  size_t successfulSlot = STARTUP_WIFI_COUNT;
+  for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) {
+    if (strcmp(startupWifi[i].ssid, connectedSsid) == 0) { successfulSlot = i; break; }
+  }
+  if (successfulSlot == 0) return true;
+  if (successfulSlot >= STARTUP_WIFI_COUNT) return false;
+
+  StartupWifiCredential ordered[STARTUP_WIFI_COUNT];
+  ordered[0] = startupWifi[successfulSlot];
+  size_t target = 1;
+  for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) if (i != successfulSlot) ordered[target++] = startupWifi[i];
+
+  File source = SD.open(STARTUP_CONFIG_PATH, FILE_READ);
+  if (!source) return false;
+  SD.remove(STARTUP_CONFIG_TEMP_PATH);
+  File output = SD.open(STARTUP_CONFIG_TEMP_PATH, FILE_WRITE);
+  if (!output) { source.close(); return false; }
+
+  bool inScreen = false;
+  while (source.available()) {
+    String original = source.readStringUntil('\n');
+    if (original.endsWith("\r")) original.remove(original.length() - 1);
+    String parsed = trimStartupLine(original);
+    if (!inScreen) {
+      int equals = parsed.indexOf('=');
+      if (equals >= 0) {
+        String key = trimStartupLine(parsed.substring(0, equals)); key.toUpperCase();
+        if (key == "SCREEN") inScreen = true;
+        else {
+          int slot = -1; bool password = false;
+          if (key == "SSID") slot = 0;
+          else if (key == "PASS") { slot = 0; password = true; }
+          else if (key == "SSID1") slot = 1;
+          else if (key == "PASS1") { slot = 1; password = true; }
+          else if (key == "SSID2") slot = 2;
+          else if (key == "PASS2") { slot = 2; password = true; }
+          if (slot >= 0) {
+            output.printf("%s = %s\r\n", key.c_str(), password ? ordered[slot].password : ordered[slot].ssid);
+            continue;
+          }
+        }
+      }
+    }
+    output.print(original); output.print("\r\n");
+  }
+  source.close(); output.close();
+
+  SD.remove(STARTUP_CONFIG_BACKUP_PATH);
+  if (!SD.rename(STARTUP_CONFIG_PATH, STARTUP_CONFIG_BACKUP_PATH)) { SD.remove(STARTUP_CONFIG_TEMP_PATH); return false; }
+  if (!SD.rename(STARTUP_CONFIG_TEMP_PATH, STARTUP_CONFIG_PATH)) {
+    SD.rename(STARTUP_CONFIG_BACKUP_PATH, STARTUP_CONFIG_PATH); return false;
+  }
+  SD.remove(STARTUP_CONFIG_BACKUP_PATH);
+  for (size_t i = 0; i < STARTUP_WIFI_COUNT; ++i) startupWifi[i] = ordered[i];
+  Serial.printf("Successful Wi-Fi promoted to SSID: %s\n", connectedSsid);
+  return true;
+}
+
+bool pauseSdUpload(Print &reply)
+{
+  if (!sdUploadFile) {
+    reply.println("ERR|fp|not_open");
+    return false;
+  }
+  sdUploadFile.flush();
+  sdUploadFile.close();
+  reply.printf("OK|FP|%s|%u|%u\n", sdUploadPath.c_str(),
+               static_cast<unsigned>(sdUploadWrittenSize),
+               static_cast<unsigned>(sdUploadExpectedSize));
+  return true;
+}
+
 void drawWifiStatus(const char *line1, const char *line2, uint16_t color)
 {
-  setBacklight(true);
+  setBacklight(BACKLIGHT_DEFAULT_LEVEL);
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("NXT Display", tft.width() / 2, 70, 4);
+  tft.drawString("Smart Display", tft.width() / 2, 70, 4);
   tft.setTextColor(color, TFT_BLACK);
   tft.drawString(line1 ? line1 : "Wi-Fi", tft.width() / 2, 140, 4);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -1724,7 +2004,7 @@ void drawWifiProgress(uint32_t elapsedMs)
 
 void drawWifiConnected(const char *ssid)
 {
-  setBacklight(true);
+  setBacklight(BACKLIGHT_DEFAULT_LEVEL);
   String ipText = WiFi.localIP().toString();
   int ipScale = 2;
   if (tft.textWidth(ipText, 4) * ipScale > tft.width() - 20) {
@@ -1752,7 +2032,15 @@ void drawWifiConnected(const char *ssid)
 
 void runStartupScreenScript()
 {
-  if (!sdReady || !startupScreenAvailable) {
+  if (!sdReady) {
+    runBuiltinScript(STARTUP_NO_SD_SCRIPT, sizeof(STARTUP_NO_SD_SCRIPT) / sizeof(STARTUP_NO_SD_SCRIPT[0]));
+    delay(8000);
+    animateHardwareScroll('L', 600);
+    runBuiltinScript(STARTUP_DEMO_SCRIPT, sizeof(STARTUP_DEMO_SCRIPT) / sizeof(STARTUP_DEMO_SCRIPT[0]));
+    Serial.println("Built-in no-SD guide and component demo executed");
+    return;
+  }
+  if (!startupScreenAvailable) {
     return;
   }
 
@@ -1997,6 +2285,7 @@ void startOta()
   }
 
   saveLastWifiSsid(WiFi.SSID().c_str());
+  promoteSuccessfulStartupWifi(WiFi.SSID().c_str());
   drawWifiConnected(WiFi.SSID().c_str());
 
   ArduinoOTA.setHostname(OTA_HOSTNAME);
@@ -2007,7 +2296,7 @@ void startOta()
   ArduinoOTA.onStart([]() {
     otaInProgress = true;
     otaDisplayedPercent = -1;
-    setBacklight(true);
+    setBacklight(BACKLIGHT_DEFAULT_LEVEL);
     drawOtaProgress(0, "Receiving firmware...", TFT_YELLOW);
     Serial.println("OTA update started");
   });
@@ -2042,9 +2331,9 @@ void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t 
                 char hAlign, char vAlign)
 {
   lineWidth = constrain(lineWidth, 1, 4);
-  tft.fillRoundRect(x, y, w, h, 6, fill);
+  tft.fillRect(x, y, w, h, fill);
   for (int i = 0; i < lineWidth; ++i) {
-    tft.drawRoundRect(x + i, y + i, w - i * 2, h - i * 2, max(0, 6 - i), outline);
+    tft.drawRect(x + i, y + i, w - i * 2, h - i * 2, outline);
   }
   drawAlignedTextBox(label, x, y, w, h, text, fill, font, hAlign, vAlign, false);
 
@@ -2080,6 +2369,22 @@ void drawButton(int id, int x, int y, int w, int h, const char *label, uint16_t 
   strlcpy(button.label, label ? label : "", sizeof(button.label));
 
   Serial.printf("GUI button %d rendered\n", id);
+}
+
+void drawLineComponent(int id, int x1, int y1, int x2, int y2, int thickness, uint16_t color)
+{
+  thickness = constrain(thickness, 1, 16);
+  const int firstOffset = -(thickness / 2);
+  const int lastOffset = firstOffset + thickness - 1;
+  const bool mostlyHorizontal = abs(x2 - x1) >= abs(y2 - y1);
+  for (int offset = firstOffset; offset <= lastOffset; ++offset) {
+    if (mostlyHorizontal) {
+      tft.drawLine(x1, y1 + offset, x2, y2 + offset, color);
+    } else {
+      tft.drawLine(x1 + offset, y1, x2 + offset, y2, color);
+    }
+  }
+  Serial.printf("GUI line %d rendered\n", id);
 }
 
 void drawBox(int id, int x, int y, int w, int h, uint16_t fill, uint16_t outline, int radius, int lineWidth)
@@ -2617,10 +2922,19 @@ uint16_t correctTouchX(uint16_t x)
   return constrain(corrected, 0, tft.width() - 1);
 }
 
-bool readTouchPoint(uint16_t &x, uint16_t &y)
+bool readTouchPoint(uint16_t &x, uint16_t &y, bool movingSample = false)
 {
-  if (!tft.getTouch(&x, &y, TOUCH_THRESHOLD)) {
-    return false;
+  if (movingSample) {
+    // getTouch() rejects rapidly changing samples as jitter. Once a swipe has
+    // started, read calibrated raw coordinates so a moving finger is retained.
+    if (tft.getTouchRawZ() <= TOUCH_MOVE_THRESHOLD || !tft.getTouchRaw(&x, &y)) {
+      return false;
+    }
+    tft.convertRawXY(&x, &y);
+  } else {
+    if (!tft.getTouch(&x, &y, TOUCH_THRESHOLD)) {
+      return false;
+    }
   }
 
   x = constrain(x, 0, tft.width() - 1);
@@ -2693,16 +3007,12 @@ void drawButtonPressedState(int buttonIndex, bool pressed)
   uint16_t ringColor = contrastRgb565(button.fill);
   uint16_t innerColor = ringColor == TFT_BLACK ? TFT_WHITE : TFT_BLACK;
   for (int i = 0; i < ringWidth; ++i) {
-    int radius = max(1, 6 - min(i, 5));
-    tft.drawRoundRect(button.x + i, button.y + i,
-                      button.w - i * 2, button.h - i * 2,
-                      radius, ringColor);
+    tft.drawRect(button.x + i, button.y + i,
+                 button.w - i * 2, button.h - i * 2, ringColor);
   }
   for (int i = ringWidth; i < ringWidth + 2; ++i) {
-    int radius = max(1, 6 - min(i, 5));
-    tft.drawRoundRect(button.x + i, button.y + i,
-                      button.w - i * 2, button.h - i * 2,
-                      radius, innerColor);
+    tft.drawRect(button.x + i, button.y + i,
+                 button.w - i * 2, button.h - i * 2, innerColor);
   }
 }
 
@@ -2727,6 +3037,58 @@ void sendUdpEventLine(const String &line)
   GuiUdp.beginPacket(udpEventPeerIp, udpEventPeerPort);
   GuiUdp.print(line);
   GuiUdp.endPacket();
+}
+
+void emitSwipeEvent(const char *direction, uint16_t x1, uint16_t y1,
+                    uint16_t x2, uint16_t y2, uint32_t durationMs)
+{
+  String event = String("EV|SWIPE|0|") + direction + "|" + x1 + "|" + y1 +
+                 "|" + x2 + "|" + y2 + "|" + durationMs + "\n";
+  Serial.print(event);
+  UiSerial.print(event);
+  sendUdpEventLine(event);
+}
+
+void finishScreenSwipe(uint32_t now)
+{
+  if (!screenSwipeTracking) {
+    return;
+  }
+  screenSwipeTracking = false;
+  const int dx = static_cast<int>(screenSwipeLastX) - static_cast<int>(screenSwipeStartX);
+  const int dy = static_cast<int>(screenSwipeLastY) - static_cast<int>(screenSwipeStartY);
+  const uint32_t durationMs = now - screenSwipeStartedAt;
+  const char *rejectReason = nullptr;
+  if (durationMs > SWIPE_MAX_DURATION_MS) {
+    rejectReason = "TOO_SLOW";
+  } else if (abs(dx) < SWIPE_MIN_DISTANCE) {
+    rejectReason = "TOO_SHORT";
+  } else if (abs(dx) <= abs(dy) * 2) {
+    rejectReason = "NOT_HORIZONTAL";
+  }
+  if (rejectReason != nullptr) {
+    if (TOUCH_SWIPE_DEBUG) {
+      Serial.printf("SWIPE|REJECT|%s|dx=%d|dy=%d|ms=%lu|from=%u,%u|to=%u,%u\n",
+                    rejectReason, dx, dy, static_cast<unsigned long>(durationMs),
+                    screenSwipeStartX, screenSwipeStartY,
+                    screenSwipeLastX, screenSwipeLastY);
+    }
+    return;
+  }
+  if (TOUCH_SWIPE_DEBUG) {
+    Serial.printf("SWIPE|ACCEPT|%s|dx=%d|dy=%d|ms=%lu|from=%u,%u|to=%u,%u\n",
+                  dx < 0 ? "LEFT" : "RIGHT", dx, dy,
+                  static_cast<unsigned long>(durationMs),
+                  screenSwipeStartX, screenSwipeStartY,
+                  screenSwipeLastX, screenSwipeLastY);
+  }
+  const bool swipeLeft = dx < 0;
+  emitSwipeEvent(swipeLeft ? "LEFT" : "RIGHT",
+                 screenSwipeStartX, screenSwipeStartY,
+                 screenSwipeLastX, screenSwipeLastY, durationMs);
+  if (swipeAutoScrollEnabled) {
+    animateHardwareScroll(swipeLeft ? 'R' : 'L', DEFAULT_SCROLL_DURATION_MS);
+  }
 }
 
 void emitButtonEvent(int buttonIndex, const char *event, uint16_t x, uint16_t y)
@@ -2824,6 +3186,8 @@ void updatePressedTouchControl(uint16_t x, uint16_t y, const char *eventName)
 void updateTouchButtons()
 {
   static uint32_t lastPoll = 0;
+  static bool debugTouchWasDown = false;
+  static uint32_t debugTouchStartedAt = 0;
   uint32_t now = millis();
   if (now - lastPoll < TOUCH_POLL_INTERVAL_MS) {
     return;
@@ -2832,7 +3196,21 @@ void updateTouchButtons()
 
   uint16_t x;
   uint16_t y;
-  if (!readTouchPoint(x, y)) {
+  if (!readTouchPoint(x, y, screenSwipeTracking)) {
+    if (screenSwipeTracking && now - screenSwipeLastTouchAt < SWIPE_RELEASE_GRACE_MS) {
+      if (TOUCH_SWIPE_DEBUG) {
+        Serial.printf("TOUCH|GAP|ms=%lu\n",
+                      static_cast<unsigned long>(now - screenSwipeLastTouchAt));
+      }
+      return;
+    }
+    if (TOUCH_SWIPE_DEBUG && debugTouchWasDown) {
+      Serial.printf("TOUCH|UP|x=%u|y=%u|ms=%lu\n",
+                    lastTouchX, lastTouchY,
+                    static_cast<unsigned long>(now - debugTouchStartedAt));
+    }
+    debugTouchWasDown = false;
+    finishScreenSwipe(now);
     if (pressedButtonIndex >= 0) {
       drawButtonPressedState(pressedButtonIndex, false);
       emitButtonEvent(pressedButtonIndex, "UP", lastTouchX, lastTouchY);
@@ -2864,10 +3242,42 @@ void updateTouchButtons()
     return;
   }
 
+  if (TOUCH_SWIPE_DEBUG) {
+    if (!debugTouchWasDown) {
+      debugTouchWasDown = true;
+      debugTouchStartedAt = now;
+      Serial.printf("TOUCH|DOWN|x=%u|y=%u|t=%lu\n",
+                    x, y, static_cast<unsigned long>(now));
+    } else {
+      Serial.printf("TOUCH|MOVE|x=%u|y=%u|ms=%lu\n",
+                    x, y, static_cast<unsigned long>(now - debugTouchStartedAt));
+    }
+  }
   lastTouchX = x;
   lastTouchY = y;
+  if (screenSwipeTracking) {
+    screenSwipeLastX = x;
+    screenSwipeLastY = y;
+    screenSwipeLastTouchAt = now;
+    return;
+  }
   currentTouchButtonIndex = findTouchedButton(x, y);
   currentTouchControlIndex = currentTouchButtonIndex < 0 ? findTouchedControl(x, y) : -1;
+
+  if (pressedButtonIndex < 0 && pressedTouchControlIndex < 0 &&
+      currentTouchButtonIndex < 0 && currentTouchControlIndex < 0) {
+    screenSwipeTracking = true;
+    screenSwipeStartX = x;
+    screenSwipeStartY = y;
+    screenSwipeLastX = x;
+    screenSwipeLastY = y;
+    screenSwipeStartedAt = now;
+    screenSwipeLastTouchAt = now;
+    if (TOUCH_SWIPE_DEBUG) {
+      Serial.printf("SWIPE|START|x=%u|y=%u\n", x, y);
+    }
+    return;
+  }
 
   if (pressedButtonIndex < 0 && currentTouchButtonIndex >= 0) {
     pressedButtonIndex = currentTouchButtonIndex;
@@ -2890,10 +3300,12 @@ void updateTouchButtons()
 
 void drawStartupScreen()
 {
-  setBacklight(true);
+  setBacklight(BACKLIGHT_DEFAULT_LEVEL);
   resetScene();
   currentScreenColor = TFT_BLACK;
   tft.fillScreen(TFT_BLACK);
+  if (!sdReady)
+    runBuiltinScript(STARTUP_NO_SD_SCRIPT, sizeof(STARTUP_NO_SD_SCRIPT) / sizeof(STARTUP_NO_SD_SCRIPT[0]));
 }
 
 bool processCommand(char *line, Print &reply)
@@ -2908,6 +3320,12 @@ bool processCommand(char *line, Print &reply)
 
   for (char *p = command; *p != '\0'; ++p) {
     *p = static_cast<char>(toupper(static_cast<unsigned char>(*p)));
+  }
+
+  const size_t commandLength = strlen(command);
+  if (commandLength > 2 && command[commandLength - 2] == '/' && command[commandLength - 1] == '?') {
+    command[commandLength - 2] = '\0';
+    return printCommandHelp(reply, command);
   }
 
   uint16_t scriptColor = 0;
@@ -3029,8 +3447,14 @@ bool processCommand(char *line, Print &reply)
   if (strcmp(command, "FW") == 0) {
     char *path = strtok(nullptr, "|");
     char *sizeText = strtok(nullptr, "|");
+    char *resumeText = strtok(nullptr, "|");
     size_t expectedSize = sizeText ? static_cast<size_t>(strtoul(sizeText, nullptr, 10)) : 0;
-    return beginSdUpload(path, expectedSize, reply);
+    size_t resumeOffset = resumeText ? static_cast<size_t>(strtoul(resumeText, nullptr, 10)) : 0;
+    return beginSdUpload(path, expectedSize, resumeOffset, reply);
+  }
+
+  if (strcmp(command, "FP") == 0) {
+    return pauseSdUpload(reply);
   }
 
   if (strcmp(command, "FD") == 0) {
@@ -3061,9 +3485,30 @@ bool processCommand(char *line, Print &reply)
     return true;
   }
 
+  if (strcmp(command, "SCRLL") == 0) {
+    char *directionText = strtok(nullptr, "|");
+    int requestedDuration = parseIntField(strtok(nullptr, "|"), DEFAULT_SCROLL_DURATION_MS);
+    char direction = directionText && directionText[0]
+      ? static_cast<char>(toupper(static_cast<unsigned char>(directionText[0]))) : '\0';
+    uint16_t durationMs = static_cast<uint16_t>(constrain(requestedDuration, 80, 2000));
+    bool ok = animateHardwareScroll(direction, durationMs);
+    sendAck(reply, original, ok);
+    return ok;
+  }
+
+  if (strcmp(command, "SPK") == 0) {
+    int requestedFrequency = parseIntField(strtok(nullptr, "|"), SPEAKER_DEFAULT_FREQUENCY);
+    int requestedDuration = parseIntField(strtok(nullptr, "|"), SPEAKER_DEFAULT_DURATION_MS);
+    uint32_t frequency = static_cast<uint32_t>(constrain(requestedFrequency, 20, 20000));
+    uint32_t durationMs = static_cast<uint32_t>(constrain(requestedDuration, 10, 60000));
+    startSpeakerTone(frequency, durationMs);
+    sendAck(reply, original, true);
+    return true;
+  }
+
   if (strcmp(command, "BL") == 0) {
-    int enabled = parseIntField(strtok(nullptr, "|"), 1);
-    setBacklight(enabled != 0);
+    int requestedLight = parseIntField(strtok(nullptr, "|"), BACKLIGHT_DEFAULT_LEVEL);
+    setBacklight(static_cast<uint8_t>(constrain(requestedLight, 0, 255)));
     sendAck(reply, original, true);
     return true;
   }
@@ -3087,6 +3532,20 @@ bool processCommand(char *line, Print &reply)
     int lineWidth = parseIntField(strtok(nullptr, "|"), 1);
     drawBox(id, x, y, w, h, fill, outline, radius, lineWidth);
     storeSceneLine(command, id, original);
+    sendAck(reply, original, true);
+    return true;
+  }
+
+  if (strcmp(command, "LN") == 0) {
+    int id = parseIntField(strtok(nullptr, "|"));
+    int x1 = parseIntField(strtok(nullptr, "|"));
+    int y1 = parseIntField(strtok(nullptr, "|"));
+    int x2 = parseIntField(strtok(nullptr, "|"));
+    int y2 = parseIntField(strtok(nullptr, "|"));
+    int thickness = parseIntField(strtok(nullptr, "|"), 1);
+    uint16_t color = parseColor(strtok(nullptr, "|"), TFT_WHITE);
+    drawLineComponent(id, x1, y1, x2, y2, thickness, color);
+    storeSceneLine("LN", id, original);
     sendAck(reply, original, true);
     return true;
   }
@@ -3227,8 +3686,16 @@ bool processCommand(char *line, Print &reply)
   }
 
   if (strcmp(command, "SW") == 0) {
-    int id = parseIntField(strtok(nullptr, "|"));
-    int x = parseIntField(strtok(nullptr, "|"));
+    char *idText = strtok(nullptr, "|");
+    char *xText = strtok(nullptr, "|");
+    if (idText != nullptr && xText == nullptr &&
+        (strcmp(idText, "0") == 0 || strcmp(idText, "1") == 0)) {
+      swipeAutoScrollEnabled = idText[0] == '1';
+      sendAck(reply, original, true);
+      return true;
+    }
+    int id = parseIntField(idText);
+    int x = parseIntField(xText);
     int y = parseIntField(strtok(nullptr, "|"));
     int w = parseIntField(strtok(nullptr, "|"));
     int h = parseIntField(strtok(nullptr, "|"));
@@ -3363,6 +3830,9 @@ void setup()
 {
   Serial.begin(115200);
   UiSerial.begin(UI_UART_BAUD, SERIAL_8N1, UI_UART_RX, UI_UART_TX);
+  ledcSetup(SPEAKER_PWM_CHANNEL, SPEAKER_DEFAULT_FREQUENCY, 8);
+  ledcAttachPin(SPEAKER_PIN, SPEAKER_PWM_CHANNEL);
+  ledcWriteTone(SPEAKER_PWM_CHANNEL, 0);
   delay(200);
   Serial.println();
   Serial.println("Starting ESP32 GUI command renderer");
@@ -3380,33 +3850,33 @@ void setup()
   pinMode(TFT_MISO, INPUT_PULLUP);
   SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI, TFT_CS);
 
-  if (BACKLIGHT_PIN != 255) {
-    pinMode(BACKLIGHT_PIN, OUTPUT);
-    blinkBacklightAtBoot();
-  }
-
   sdReady = SD.begin(SD_CS_PIN, SPI, SD_SPI_FREQUENCY) && SD.cardType() != CARD_NONE;
   printSdStatus(Serial);
 
   tft.init();
+  // TFT_eSPI configures TFT_BL as a normal digital output in init(). Attach
+  // LEDC only afterwards, otherwise init() disconnects PWM from GPIO32.
+  if (BACKLIGHT_PIN != 255) {
+    ledcSetup(BACKLIGHT_PWM_CHANNEL, BACKLIGHT_PWM_FREQUENCY, 8);
+    ledcAttachPin(BACKLIGHT_PIN, BACKLIGHT_PWM_CHANNEL);
+  }
   tft.setRotation(3);
   tft.invertDisplay(DISPLAY_INVERTED);
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(jpegOutput);
-  setBacklight(true);
+  setBacklight(BACKLIGHT_DEFAULT_LEVEL);
   drawStartupScreen();
   loadStartupConfig();
   startOta();
   runStartupScreenScript();
 
-  Serial.println("Commands: ?, HELP, SHOWIP, RESET, SS, TF, FL, SD, LS|path, FS|path, FI|path, RM|path, SL, FR|path|offset|len, FW|path|size, FD|hex, FDO|offset|hex, FE, SC|path, JPG|id|x|y|path|scale|srcX|srcY|srcW|srcH, IV|1, BL|1, CL|color, BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V, BX|id|x|y|w|h|fill|outline|radius|line, RR|id|x|y|w|h|fill|outline|radius|line, TX|id|x|y|text|color|bg|font|w|h|H|V, TW|id|x|y|w|h|title|text|fill|outline, TR|id|x|y|w|h|value|max|track|thumb|element, VT|id|x|y|w|h|value|max|track|thumb|element, PB|id|x|y|w|h|percent|fill|background|outline, VP|id|x|y|w|h|percent|fill|background|outline, CC|id|x|y|diameter|fill|outline|line, SW|id|x|y|w|h|0/1|stroke|thumb|fill|element|line, SB|id|x|y|w|h|H/V|value|max|track|thumb|element, BM|id|x|y|name|fg|bg|scale");
+  Serial.println("Commands: HELP, COMMAND/?, SHOWIP, RESET, SS, SD/file commands, CL, SCRLL, BL, SPK, IV, TF, BT, BX, RR, LN, TX, TW, TR, VT, PB, VP, CC, SW, SB, JPG, BM");
   sendReady(Serial);
   sendReady(UiSerial);
 }
 
 void loop()
 {
-  setBacklight(true);
   updateHeartbeat();
   if (otaReady) {
     ArduinoOTA.handle();
@@ -3426,5 +3896,6 @@ void loop()
   updateTouchButtons();
   readCommandStream(Serial, usbCommand, usbCommandLength);
   readCommandStream(UiSerial, uartCommand, uartCommandLength);
+  updateSpeakerTone();
   readUdpCommands();
 }

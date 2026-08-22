@@ -1,4 +1,7 @@
-# NXT_Display
+# Smart Display firmware
+
+The GitHub repository keeps its historical `NXT_Display` name, while the active
+product and OTA hostname are `Smart Display` and `smart-display.local`.
 
 PlatformIO project for an ESP32 used as a smart display controller for an SPI ILI9488 screen.
 
@@ -79,6 +82,15 @@ Default baud rate: `115200`.
 
 USB Serial also accepts the same commands, which is convenient for testing from the PlatformIO monitor.
 
+### Speaker output
+
+`SPK` generates a square wave on `GPIO25`. A passive piezo element may be
+connected between GPIO25 and GND. Drive a low-impedance electromagnetic speaker
+through a transistor or MOSFET with a common ground; do not connect it directly
+to the ESP32 pin.
+
+`SPK` uses 1000 Hz for 500 ms. `SPK|440|200` uses 440 Hz for 200 ms.
+
 ## Command protocol
 
 Each command is one text line ending with `\n`. Fields are separated by `|`.
@@ -88,6 +100,10 @@ Colors are RGB565 values. You can send decimal values or hex values such as `0x0
 | Command | Meaning |
 | --- | --- |
 | `CL|color` | Clear screen |
+| `SCRLL|L/R|duration_ms` | Hardware page-turn animation |
+| `LN|id|x1|y1|x2|y2|thick|color` | Draw line |
+| `BX|id|x|y|w|h|fill|stroke|radius|thick` | Draw rectangle |
+| `CC|id|x|y|diameter|fill|stroke|thick` | Draw circle |
 | `BT|id|x|y|w|h|label|fill|outline|text|line|font|H|V` | Draw button |
 | `TW|id|x|y|w|h|title|text|fill|outline` | Draw text window |
 | `SB|id|x|y|w|h|H/V|value|max|track|thumb` | Draw scroll bar |
@@ -97,10 +113,26 @@ Colors are RGB565 values. You can send decimal values or hex values such as `0x0
 | `SC|path` | Run a text script from microSD |
 | `SD` | Show microSD status and capacity |
 | `LS|path` | List files in a microSD directory |
-| `BL|1` / `BL|0` | Backlight on/off |
+| `BL|light` | GPIO32 backlight PWM brightness, `light` is 0..255 |
+| `SPK` or `SPK|frequency|duration` | GPIO25 square wave; default 1000 Hz for 500 ms |
+| `SW|0` / `SW|1` | Disable/enable automatic page turn after a swipe |
+| `SW|id|x|y|w|h|state|stroke|thumb|fill|element|thick` | Draw touch switch |
 | `IV|1` / `IV|0` | Display inversion on/off |
 
 The older one-letter commands `C`, `B`, `W`, `S`, `T`, `L`, and `I` are still accepted for compatibility.
+
+`HELP` prints the compact command list. `COMMAND/?`, for example `BL/?` or
+`SPK/?`, prints the exact syntax. A horizontal gesture on an area not occupied
+by a button, switch or slider produces:
+
+```text
+EV|SWIPE|0|LEFT|x1|y1|x2|y2|duration_ms
+EV|SWIPE|0|RIGHT|x1|y1|x2|y2|duration_ms
+```
+
+Moving swipe samples use calibrated raw touch coordinates because the normal
+TFT_eSPI validation intentionally rejects rapidly changing points. Short touch
+dropouts up to 120 ms are joined into the same gesture.
 
 Built-in bitmap names:
 
@@ -160,7 +192,7 @@ C:\Users\basachka\.platformio\penv\Scripts\pio.exe run -t upload
 
 1. Configure up to three Wi-Fi profiles in `/startup.txt` on the microSD card (see `tools/GUI_Maker/sd/startup.example.txt`). As a fallback, copy `include/ota_secrets.example.h` to `include/ota_secrets.h` and enter `WIFI_SSID_1` through `WIFI_SSID_3`. Empty profiles are skipped; files containing real passwords are ignored by Git.
 2. Upload the firmware once over USB with the `esp32dev` environment.
-3. At startup the display shows each Wi-Fi connection attempt for up to 5 seconds. After a successful connection it shows the selected SSID and IP address. Confirm in the serial monitor that `OTA ready: nxt-display.local` is printed.
+3. At startup the display shows each Wi-Fi connection attempt for up to 5 seconds. After a successful connection it shows the selected SSID and IP address. Confirm in the serial monitor that `OTA ready: smart-display.local` is printed.
 4. Upload subsequent builds with the `esp32dev_ota` environment.
 
 If `OTA_PASSWORD` is not empty, the OTA upload script reads it from the ignored `include/ota_secrets.h` file automatically.
