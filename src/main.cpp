@@ -4,6 +4,7 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <TJpg_Decoder.h>
+#include <Wire.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Preferences.h>
@@ -60,6 +61,17 @@ constexpr uint8_t SPEAKER_PIN = 25;
 constexpr uint8_t SPEAKER_PWM_CHANNEL = 0;
 constexpr uint32_t SPEAKER_DEFAULT_FREQUENCY = 1000;
 constexpr uint32_t SPEAKER_DEFAULT_DURATION_MS = 500;
+// Default ESP32 I2C pins 21/22 are occupied by TFT_DC and TOUCH_CS. UART2
+// already uses 16/17, so the battery monitor has its own conflict-free bus.
+constexpr uint8_t INA219_SDA_PIN = 26;
+constexpr uint8_t INA219_SCL_PIN = 33;
+constexpr uint8_t INA219_ADDRESS_FIRST = 0x40;
+constexpr uint8_t INA219_ADDRESS_LAST = 0x4F;
+constexpr uint16_t INA219_CONFIG_32V_2A = 0x399F;
+constexpr uint16_t INA219_CALIBRATION_32V_2A = 4096;
+constexpr uint16_t BATTERY_EMPTY_MV = 3300;
+constexpr uint16_t BATTERY_FULL_MV = 4200;
+constexpr int16_t BATTERY_IDLE_CURRENT_MA = 20;
 constexpr uint32_t SD_SPI_FREQUENCY = 4000000;
 constexpr uint32_t UI_UART_BAUD = 115200;
 constexpr uint16_t GUI_UDP_PORT = 4210;
@@ -189,6 +201,8 @@ bool resetRequested = false;
 uint32_t resetAtMs = 0;
 bool speakerToneActive = false;
 uint32_t speakerToneStopAt = 0;
+bool ina219Ready = false;
+uint8_t ina219Address = INA219_ADDRESS_FIRST;
 IPAddress udpEventPeerIp;
 uint16_t udpEventPeerPort = 0;
 uint16_t currentScreenColor = TFT_BLACK;
@@ -226,6 +240,14 @@ uint16_t screenSwipeLastY = 0;
 uint32_t screenSwipeStartedAt = 0;
 uint32_t screenSwipeLastTouchAt = 0;
 bool swipeAutoScrollEnabled = false;
+
+struct BatteryTelemetry {
+  uint16_t voltageMv;
+  int16_t currentMa;
+  uint16_t powerMw;
+  uint8_t percent;
+  const char *state;
+};
 
 const uint8_t ICON_PLAY[] PROGMEM = {
   0b00000000, 0b00000000,
@@ -362,6 +384,89 @@ bool loadStartupConfig();
 void runStartupScreenScript();
 void drawWifiStatus(const char *line1, const char *line2, uint16_t color);
 void resetScene();
+
+bool writeIna219Register(uint8_t reg, uint16_t value)
+{
+  Wire.beginTransmission(ina219Address);
+  Wire.write(reg);
+  Wire.write(static_cast<uint8_t>(value >> 8));
+  Wire.write(static_cast<uint8_t>(value & 0xFF));
+  return Wire.endTransmission() == 0;
+}
+
+bool readIna219Register(uint8_t reg, uint16_t &value)
+{
+  Wire.beginTransmission(ina219Address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(ina219Address, static_cast<uint8_t>(2)) != 2) return false;
+  value = static_cast<uint16_t>(Wire.read()) << 8;
+  value |= static_cast<uint16_t>(Wire.read());
+  return true;
+}
+
+bool initializeIna219()
+{
+  bool found = false;
+  for (uint8_t address = INA219_ADDRESS_FIRST; address <= INA219_ADDRESS_LAST; ++address) {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() == 0) {
+      ina219Address = address;
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    ina219Ready = false;
+    return false;
+  }
+  // The common CJMCU-219 module uses a 0.1 ohm shunt. This calibration gives
+  // 0.1 mA/current bit and 2 mW/power bit over the 32 V, 2 A range.
+  ina219Ready = writeIna219Register(0x00, INA219_CONFIG_32V_2A) &&
+                writeIna219Register(0x05, INA219_CALIBRATION_32V_2A);
+  return ina219Ready;
+}
+
+uint8_t batteryPercentFromVoltage(uint16_t voltageMv)
+{
+  if (voltageMv <= BATTERY_EMPTY_MV) return 0;
+  if (voltageMv >= BATTERY_FULL_MV) return 100;
+  return static_cast<uint8_t>((static_cast<uint32_t>(voltageMv - BATTERY_EMPTY_MV) * 100U) /
+                              (BATTERY_FULL_MV - BATTERY_EMPTY_MV));
+}
+
+bool readBatteryTelemetry(BatteryTelemetry &telemetry)
+{
+  if (!ina219Ready && !initializeIna219()) return false;
+
+  // A brownout can clear the calibration register while I2C keeps responding.
+  // Restore it before every measurement so CURRENT and POWER remain valid.
+  if (!writeIna219Register(0x05, INA219_CALIBRATION_32V_2A)) {
+    ina219Ready = false;
+    return false;
+  }
+
+  uint16_t busRaw = 0;
+  uint16_t currentRaw = 0;
+  uint16_t powerRaw = 0;
+  if (!readIna219Register(0x02, busRaw) || !readIna219Register(0x04, currentRaw) ||
+      !readIna219Register(0x03, powerRaw) || (busRaw & 0x0001U) != 0) {
+    ina219Ready = false;
+    return false;
+  }
+
+  telemetry.voltageMv = static_cast<uint16_t>((busRaw >> 3) * 4U);
+  const int16_t sensorCurrentRaw = static_cast<int16_t>(currentRaw);
+  // With VIN+ at the battery and VIN- at the load INA219 reports discharge as
+  // positive. The UI convention is the opposite: charge +, discharge -.
+  telemetry.currentMa = static_cast<int16_t>(-(sensorCurrentRaw / 10));
+  telemetry.powerMw = static_cast<uint16_t>(powerRaw * 2U);
+  telemetry.percent = batteryPercentFromVoltage(telemetry.voltageMv);
+  telemetry.state = telemetry.currentMa > BATTERY_IDLE_CURRENT_MA ? "CHARGING"
+                    : telemetry.currentMa < -BATTERY_IDLE_CURRENT_MA ? "DISCHARGING"
+                    : "IDLE";
+  return true;
+}
 
 void setHardwareScrollStart(uint16_t offset)
 {
@@ -874,6 +979,7 @@ void printHelp(Print &stream)
   stream.println("  'SHOWIP' - Show Wi-Fi IP and UDP port.");
   stream.println("  'RESET'  - Restart ESP.");
   stream.println("  'SS'     - Return current scene.");
+  stream.println("  'BAT'    - Read INA219 battery telemetry.");
   stream.println();
   stream.println("#file commands:");
   stream.println("  'SD'  - Show SD status.");
@@ -929,6 +1035,7 @@ bool printCommandHelp(Print &stream, const char *command)
   else if (strcmp(command, "SHOWIP") == 0) { description = "Reply with current Wi-Fi IP and UDP port."; syntax = "SHOWIP"; }
   else if (strcmp(command, "RESET") == 0) { description = "Restart ESP after a short delay."; syntax = "RESET"; }
   else if (strcmp(command, "SS") == 0) { description = "Return current scene snapshot with live values."; syntax = "SS"; }
+  else if (strcmp(command, "BAT") == 0) { description = "Read INA219 battery voltage, current, power and charge level."; syntax = "BAT  Reply: OK | BAT | percent | voltage_mV | current_mA | power_mW | CHARGING/DISCHARGING/IDLE"; }
   else if (strcmp(command, "SD") == 0) { description = "Show microSD status and capacity."; syntax = "SD"; }
   else if (strcmp(command, "DL") == 0) { description = "List microSD root directories."; syntax = "DL"; }
   else if (strcmp(command, "FL") == 0) { description = "List SD VLW fonts."; syntax = "FL"; }
@@ -3485,6 +3592,28 @@ bool processCommand(char *line, Print &reply)
     return true;
   }
 
+  if (strcmp(command, "BAT") == 0) {
+    BatteryTelemetry telemetry{};
+    if (!readBatteryTelemetry(telemetry)) {
+      reply.print("ERR|BAT|INA219_NOT_FOUND|SCAN|0x40-0x4F|SDA|");
+      reply.print(INA219_SDA_PIN);
+      reply.print("|SCL|");
+      reply.println(INA219_SCL_PIN);
+      return false;
+    }
+    reply.print("OK|BAT|");
+    reply.print(telemetry.percent);
+    reply.print('|');
+    reply.print(telemetry.voltageMv);
+    reply.print('|');
+    reply.print(telemetry.currentMa);
+    reply.print('|');
+    reply.print(telemetry.powerMw);
+    reply.print('|');
+    reply.println(telemetry.state);
+    return true;
+  }
+
   if (strcmp(command, "SCRLL") == 0) {
     char *directionText = strtok(nullptr, "|");
     int requestedDuration = parseIntField(strtok(nullptr, "|"), DEFAULT_SCROLL_DURATION_MS);
@@ -3830,6 +3959,8 @@ void setup()
 {
   Serial.begin(115200);
   UiSerial.begin(UI_UART_BAUD, SERIAL_8N1, UI_UART_RX, UI_UART_TX);
+  Wire.begin(INA219_SDA_PIN, INA219_SCL_PIN, 400000);
+  ina219Ready = initializeIna219();
   ledcSetup(SPEAKER_PWM_CHANNEL, SPEAKER_DEFAULT_FREQUENCY, 8);
   ledcAttachPin(SPEAKER_PIN, SPEAKER_PWM_CHANNEL);
   ledcWriteTone(SPEAKER_PWM_CHANNEL, 0);
@@ -3837,6 +3968,9 @@ void setup()
   Serial.println();
   Serial.println("Starting ESP32 GUI command renderer");
   Serial.printf("UART2 RX=%u TX=%u baud=%lu\n", UI_UART_RX, UI_UART_TX, UI_UART_BAUD);
+  Serial.printf("INA219 address=0x%02X SDA=%u SCL=%u status=%s\n",
+                ina219Address, INA219_SDA_PIN, INA219_SCL_PIN,
+                ina219Ready ? "ready" : "not found");
 
   pinMode(HEARTBEAT_LED_PIN, OUTPUT);
   digitalWrite(HEARTBEAT_LED_PIN, LOW);
@@ -3870,7 +4004,7 @@ void setup()
   startOta();
   runStartupScreenScript();
 
-  Serial.println("Commands: HELP, COMMAND/?, SHOWIP, RESET, SS, SD/file commands, CL, SCRLL, BL, SPK, IV, TF, BT, BX, RR, LN, TX, TW, TR, VT, PB, VP, CC, SW, SB, JPG, BM");
+  Serial.println("Commands: HELP, COMMAND/?, SHOWIP, RESET, SS, BAT, SD/file commands, CL, SCRLL, BL, SPK, IV, TF, BT, BX, RR, LN, TX, TW, TR, VT, PB, VP, CC, SW, SB, JPG, BM");
   sendReady(Serial);
   sendReady(UiSerial);
 }

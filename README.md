@@ -91,6 +91,23 @@ to the ESP32 pin.
 
 `SPK` uses 1000 Hz for 500 ms. `SPK|440|200` uses 440 Hz for 200 ms.
 
+### INA219 battery monitor
+
+The default ESP32 I2C pins cannot be used: GPIO21 is TFT D/C, GPIO22 is touch
+CS, and GPIO16/17 are UART2. Connect a CJMCU-219/INA219 module as follows:
+
+| INA219 | ESP32 pin |
+| --- | --- |
+| VCC | 3.3V |
+| GND | GND |
+| SDA | GPIO26 |
+| SCL | GPIO33 |
+
+The default I2C address is `0x40`. Connect battery positive to `VIN+` and the
+load positive to `VIN-`; all grounds must be common. `BAT` reports charge
+percentage, bus voltage, signed current, power and state. Percentage currently
+assumes one Li-ion cell from 3.30 V (0%) to 4.20 V (100%).
+
 ## Command protocol
 
 Each command is one text line ending with `\n`. Fields are separated by `|`.
@@ -115,6 +132,7 @@ Colors are RGB565 values. You can send decimal values or hex values such as `0x0
 | `LS|path` | List files in a microSD directory |
 | `BL|light` | GPIO32 backlight PWM brightness, `light` is 0..255 |
 | `SPK` or `SPK|frequency|duration` | GPIO25 square wave; default 1000 Hz for 500 ms |
+| `BAT` | Read INA219: `OK|BAT|percent|voltage_mV|current_mA|power_mW|state` |
 | `SW|0` / `SW|1` | Disable/enable automatic page turn after a swipe |
 | `SW|id|x|y|w|h|state|stroke|thumb|fill|element|thick` | Draw touch switch |
 | `IV|1` / `IV|0` | Display inversion on/off |
