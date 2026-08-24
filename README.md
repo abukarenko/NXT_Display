@@ -108,6 +108,13 @@ load positive to `VIN-`; all grounds must be common. `BAT` reports charge
 percentage, bus voltage, signed current, power and state. Percentage currently
 assumes one Li-ion cell from 3.30 V (0%) to 4.20 V (100%).
 
+For the separate bare ESP32 test board on COM4, build the
+`esp32dev_ina_test` environment. It uses the standard I2C pins SDA GPIO21 and
+SCL GPIO22 because that board has no TFT or touch controller attached. Flash
+this CP210x board with standalone `esptool` using the standard DTR/RTS reset;
+the project-level PlatformIO uploader intentionally uses a different reset
+sequence for the assembled display.
+
 ## Command protocol
 
 Each command is one text line ending with `\n`. Fields are separated by `|`.

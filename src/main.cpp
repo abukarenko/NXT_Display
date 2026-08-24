@@ -63,8 +63,14 @@ constexpr uint32_t SPEAKER_DEFAULT_FREQUENCY = 1000;
 constexpr uint32_t SPEAKER_DEFAULT_DURATION_MS = 500;
 // Default ESP32 I2C pins 21/22 are occupied by TFT_DC and TOUCH_CS. UART2
 // already uses 16/17, so the battery monitor has its own conflict-free bus.
-constexpr uint8_t INA219_SDA_PIN = 26;
-constexpr uint8_t INA219_SCL_PIN = 33;
+#ifndef INA219_SDA_GPIO
+#define INA219_SDA_GPIO 26
+#endif
+#ifndef INA219_SCL_GPIO
+#define INA219_SCL_GPIO 33
+#endif
+constexpr uint8_t INA219_SDA_PIN = INA219_SDA_GPIO;
+constexpr uint8_t INA219_SCL_PIN = INA219_SCL_GPIO;
 constexpr uint8_t INA219_ADDRESS_FIRST = 0x40;
 constexpr uint8_t INA219_ADDRESS_LAST = 0x4F;
 constexpr uint16_t INA219_CONFIG_32V_2A = 0x399F;
